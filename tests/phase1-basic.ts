@@ -9,7 +9,8 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace.TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+  const program = anchor.workspace
+    .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
 
   let member1: Keypair;
   let member2: Keypair;
@@ -22,7 +23,7 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
     member1 = Keypair.generate();
     member2 = Keypair.generate();
     member3 = Keypair.generate();
-    
+
     members = [member1.publicKey, member2.publicKey, member3.publicKey];
     threshold = 2; // 2-of-3 multisig
 
@@ -31,15 +32,15 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
     await provider.connection.requestAirdrop(member1.publicKey, airdropAmount);
     await provider.connection.requestAirdrop(member2.publicKey, airdropAmount);
     await provider.connection.requestAirdrop(member3.publicKey, airdropAmount);
-    
+
     // Wait for airdrops
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise((resolve) => setTimeout(resolve, 1000));
   });
 
   describe("Address Derivation", () => {
     it("derives deterministic multisig address", async () => {
       // Sort members as the program does
-      const sortedMembers = [...members].sort((a, b) => 
+      const sortedMembers = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
@@ -49,27 +50,31 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
         .view();
 
       console.log("Derived multisig address:", result.toString());
-      
+
       // Verify it's a valid public key
       expect(result).to.be.instanceOf(PublicKey);
-      
+
       // Call again with same params - should get same address
       const result2 = await program.methods
         .deriveAddress(sortedMembers, threshold)
         .view();
-      
+
       expect(result.toString()).to.equal(result2.toString());
       console.log("✅ Deterministic derivation verified");
     });
 
     it("derives different address for different members", async () => {
       const member4 = Keypair.generate();
-      const differentMembers = [member1.publicKey, member2.publicKey, member4.publicKey];
-      
-      const sortedMembers1 = [...members].sort((a, b) => 
+      const differentMembers = [
+        member1.publicKey,
+        member2.publicKey,
+        member4.publicKey,
+      ];
+
+      const sortedMembers1 = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
-      const sortedMembers2 = [...differentMembers].sort((a, b) => 
+      const sortedMembers2 = [...differentMembers].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
@@ -86,7 +91,7 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
     });
 
     it("derives different address for different threshold", async () => {
-      const sortedMembers = [...members].sort((a, b) => 
+      const sortedMembers = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
@@ -105,7 +110,7 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
 
   describe("Pre-funding", () => {
     it("can send SOL to derived address before initialization", async () => {
-      const sortedMembers = [...members].sort((a, b) => 
+      const sortedMembers = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
@@ -126,13 +131,15 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
       // Check balance
       const balance = await provider.connection.getBalance(multisigAddress);
       expect(balance).to.be.greaterThan(0);
-      console.log(`✅ Pre-funded with ${balance / anchor.web3.LAMPORTS_PER_SOL} SOL`);
+      console.log(
+        `✅ Pre-funded with ${balance / anchor.web3.LAMPORTS_PER_SOL} SOL`
+      );
     });
   });
 
   describe("Security: No Private Key Generation", () => {
     it("verifies no private key can be derived", async () => {
-      const sortedMembers = [...members].sort((a, b) => 
+      const sortedMembers = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
@@ -143,20 +150,25 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
       // Try to "compute" a private key like the old implementation did
       // This should NOT work for signing transactions
       const configData = {
-        members: sortedMembers.map(m => m.toString()).sort(),
+        members: sortedMembers.map((m) => m.toString()).sort(),
         threshold,
       };
       const configString = JSON.stringify(configData);
-      const configHash = crypto.createHash('sha256').update(configString).digest();
-      
+      const configHash = crypto
+        .createHash("sha256")
+        .update(configString)
+        .digest();
+
       // Old broken implementation would do: Keypair.fromSeed(seed)
       // Let's verify that approach DOESN'T give us control of the PDA
       const seed = configHash.slice(0, 32);
       const fakeKeypair = Keypair.fromSeed(seed);
-      
+
       // The fake keypair's pubkey should NOT match our PDA
-      expect(fakeKeypair.publicKey.toString()).to.not.equal(multisigAddress.toString());
-      
+      expect(fakeKeypair.publicKey.toString()).to.not.equal(
+        multisigAddress.toString()
+      );
+
       console.log("✅ Confirmed: No private key can control the PDA");
       console.log("   PDA address:", multisigAddress.toString());
       console.log("   Fake keypair:", fakeKeypair.publicKey.toString());
@@ -164,4 +176,3 @@ describe("Phase 1: Truly Self-Initiating Multisig", () => {
     });
   });
 });
-

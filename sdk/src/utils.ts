@@ -1,7 +1,11 @@
 import { PublicKey, Keypair, TransactionInstruction } from "@solana/web3.js";
 import { createHash } from "crypto";
 import * as nacl from "tweetnacl";
-import { SignatureData, TransactionMessage, CompiledInstruction } from "./types";
+import {
+  SignatureData,
+  TransactionMessage,
+  CompiledInstruction,
+} from "./types";
 
 /**
  * Domain separator for initialization messages
@@ -84,11 +88,7 @@ export function deriveMultisigAddress(
   const hashSeed = memberHash.slice(0, 8);
 
   const [pda, bump] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from("multisig"),
-      hashSeed,
-      Buffer.from([threshold]),
-    ],
+    [Buffer.from("multisig"), hashSeed, Buffer.from([threshold])],
     programId
   );
 
@@ -177,7 +177,9 @@ export function validateConfig(members: PublicKey[], threshold: number): void {
   }
 
   if (threshold > members.length) {
-    throw new Error(`Threshold (${threshold}) cannot exceed number of members (${members.length})`);
+    throw new Error(
+      `Threshold (${threshold}) cannot exceed number of members (${members.length})`
+    );
   }
 
   if (members.length === 0) {
@@ -185,7 +187,7 @@ export function validateConfig(members: PublicKey[], threshold: number): void {
   }
 
   // Check for duplicates
-  const uniqueMembers = new Set(members.map(m => m.toString()));
+  const uniqueMembers = new Set(members.map((m) => m.toString()));
   if (uniqueMembers.size !== members.length) {
     throw new Error("Duplicate members detected");
   }
@@ -246,7 +248,7 @@ export function createEd25519Instruction(
   offset += 2;
 
   // Signature instruction index (2 bytes, 0xFFFF = same instruction)
-  instructionData.writeUInt16LE(0xFFFF, offset);
+  instructionData.writeUInt16LE(0xffff, offset);
   offset += 2;
 
   // Public key offset (2 bytes, little-endian)
@@ -254,7 +256,7 @@ export function createEd25519Instruction(
   offset += 2;
 
   // Public key instruction index (2 bytes, 0xFFFF = same instruction)
-  instructionData.writeUInt16LE(0xFFFF, offset);
+  instructionData.writeUInt16LE(0xffff, offset);
   offset += 2;
 
   // Message data offset (2 bytes, little-endian)
@@ -266,7 +268,7 @@ export function createEd25519Instruction(
   offset += 2;
 
   // Message instruction index (2 bytes, 0xFFFF = same instruction)
-  instructionData.writeUInt16LE(0xFFFF, offset);
+  instructionData.writeUInt16LE(0xffff, offset);
   offset += 2;
 
   // Signature (64 bytes)
@@ -296,7 +298,7 @@ export function createEd25519Instructions(
 ): TransactionInstruction[] {
   const message = createInitializationMessage(members, threshold);
 
-  return signatures.map(sig =>
+  return signatures.map((sig) =>
     createEd25519Instruction(sig.signer, message, Buffer.from(sig.signature))
   );
 }
@@ -321,7 +323,11 @@ export function buildMessageFromInstructions(
   type Entry = { pubkey: PublicKey; isSigner: boolean; isWritable: boolean };
   const map = new Map<string, Entry>();
 
-  const observe = (pubkey: PublicKey, isSigner: boolean, isWritable: boolean) => {
+  const observe = (
+    pubkey: PublicKey,
+    isSigner: boolean,
+    isWritable: boolean
+  ) => {
     const k = pubkey.toBase58();
     const cur = map.get(k);
     if (cur) {
@@ -345,14 +351,16 @@ export function buildMessageFromInstructions(
   // Sort: writable signers first, then readonly signers, then writable non-signers,
   // then readonly non-signers. Within each tier, keep insertion order (Map preserves it).
   const all = Array.from(map.values());
-  const writableSigners = all.filter(e => e.isSigner && e.isWritable);
-  const readonlySigners = all.filter(e => e.isSigner && !e.isWritable);
-  const writableNonSigners = all.filter(e => !e.isSigner && e.isWritable);
-  const readonlyNonSigners = all.filter(e => !e.isSigner && !e.isWritable);
+  const writableSigners = all.filter((e) => e.isSigner && e.isWritable);
+  const readonlySigners = all.filter((e) => e.isSigner && !e.isWritable);
+  const writableNonSigners = all.filter((e) => !e.isSigner && e.isWritable);
+  const readonlyNonSigners = all.filter((e) => !e.isSigner && !e.isWritable);
 
   // Make sure vaultPda is actually first within writableSigners (should be by
   // insertion order, but enforce defensively).
-  const vaultIndex = writableSigners.findIndex(e => e.pubkey.equals(vaultPda));
+  const vaultIndex = writableSigners.findIndex((e) =>
+    e.pubkey.equals(vaultPda)
+  );
   if (vaultIndex > 0) {
     const [vault] = writableSigners.splice(vaultIndex, 1);
     writableSigners.unshift(vault);
@@ -365,18 +373,18 @@ export function buildMessageFromInstructions(
     ...readonlyNonSigners,
   ];
 
-  const accountKeys = ordered.map(e => e.pubkey);
+  const accountKeys = ordered.map((e) => e.pubkey);
   const accountIndex = (pubkey: PublicKey): number => {
-    const idx = accountKeys.findIndex(k => k.equals(pubkey));
+    const idx = accountKeys.findIndex((k) => k.equals(pubkey));
     if (idx < 0) {
       throw new Error(`Account ${pubkey.toBase58()} not found in account_keys`);
     }
     return idx;
   };
 
-  const compiled: CompiledInstruction[] = instructions.map(ix => ({
+  const compiled: CompiledInstruction[] = instructions.map((ix) => ({
     programIdIndex: accountIndex(ix.programId),
-    accountIndexes: Uint8Array.from(ix.keys.map(k => accountIndex(k.pubkey))),
+    accountIndexes: Uint8Array.from(ix.keys.map((k) => accountIndex(k.pubkey))),
     data: Uint8Array.from(ix.data),
   }));
 

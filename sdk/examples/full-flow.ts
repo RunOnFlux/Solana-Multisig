@@ -35,7 +35,9 @@ import * as anchor from "@coral-xyz/anchor";
 import { TrulySelfInitiatingMultisigClient } from "../src";
 import { deriveVaultAddress } from "../src/utils";
 
-const PROGRAM_ID = new PublicKey("F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo");
+const PROGRAM_ID = new PublicKey(
+  "F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo"
+);
 const VAULT_INDEX = 0;
 const RPC_URL = "http://localhost:8899";
 
@@ -58,7 +60,10 @@ async function main() {
   const multisig = client.deriveAddress(members, threshold);
   const [vault] = deriveVaultAddress(multisig, VAULT_INDEX, PROGRAM_ID);
 
-  console.log("Members:", members.map(m => m.toBase58()));
+  console.log(
+    "Members:",
+    members.map((m) => m.toBase58())
+  );
   console.log("Multisig PDA:", multisig.toBase58());
   console.log("Vault PDA   :", vault.toBase58(), "← deposit address");
 
@@ -70,7 +75,10 @@ async function main() {
   const funder = Keypair.generate();
   await airdrop(connection, funder.publicKey, 2 * LAMPORTS_PER_SOL);
   await transferSol(connection, funder, vault, 1 * LAMPORTS_PER_SOL);
-  console.log("Vault balance after pre-fund:", await connection.getBalance(vault));
+  console.log(
+    "Vault balance after pre-fund:",
+    await connection.getBalance(vault)
+  );
 
   // ========================================================================
   // 3. Submit the init tx (SDK builds + sends Ed25519 ixs + initialize_multisig)
@@ -138,7 +146,9 @@ async function main() {
   );
 
   const balAfter = await connection.getBalance(recipient.publicKey);
-  console.log(`Recipient received: ${(balAfter - balBefore) / LAMPORTS_PER_SOL} SOL`);
+  console.log(
+    `Recipient received: ${(balAfter - balBefore) / LAMPORTS_PER_SOL} SOL`
+  );
 
   // The vault signed the inner SystemProgram::transfer via invoke_signed
   // (vault PDA seeds are cached on the proposal at create time, used here at
@@ -150,7 +160,11 @@ async function main() {
 // Helpers
 // ============================================================================
 
-async function airdrop(connection: Connection, pubkey: PublicKey, lamports: number) {
+async function airdrop(
+  connection: Connection,
+  pubkey: PublicKey,
+  lamports: number
+) {
   const sig = await connection.requestAirdrop(pubkey, lamports);
   await connection.confirmTransaction(sig, "confirmed");
 }
@@ -162,12 +176,18 @@ async function transferSol(
   lamports: number
 ) {
   const tx = new Transaction().add(
-    SystemProgram.transfer({ fromPubkey: from.publicKey, toPubkey: to, lamports })
+    SystemProgram.transfer({
+      fromPubkey: from.publicKey,
+      toPubkey: to,
+      lamports,
+    })
   );
-  await sendAndConfirmTransaction(connection, tx, [from], { commitment: "confirmed" });
+  await sendAndConfirmTransaction(connection, tx, [from], {
+    commitment: "confirmed",
+  });
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error(err);
   process.exit(1);
 });

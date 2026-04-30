@@ -39,7 +39,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
     try {
       const sig = await provider.connection.requestAirdrop(pubkey, amount);
       await provider.connection.confirmTransaction(sig);
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 500));
     } catch {
       /* airdrop may rate-limit; tests handle insufficient funds */
     }
@@ -55,7 +55,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
     const sorted = sortMembers(members);
     return Buffer.concat([
       Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
-      ...sorted.map(m => Buffer.from(m.toBytes())),
+      ...sorted.map((m) => Buffer.from(m.toBytes())),
       Buffer.from([threshold]),
     ]);
   }
@@ -67,10 +67,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
   ) {
     const message = buildInitMessage(members, threshold);
     const signature = nacl.sign.detached(message, signer.secretKey);
-    const messageHash = crypto
-      .createHash("sha256")
-      .update(message)
-      .digest();
+    const messageHash = crypto.createHash("sha256").update(message).digest();
     return {
       signer: signer.publicKey,
       signature: Array.from(signature),
@@ -116,7 +113,10 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
   const VAULT_PDA_SEED = Buffer.from("vault");
 
-  function deriveVault(multisig: PublicKey, vaultIndex: number): [PublicKey, number] {
+  function deriveVault(
+    multisig: PublicKey,
+    vaultIndex: number
+  ): [PublicKey, number] {
     return PublicKey.findProgramAddressSync(
       [VAULT_PDA_SEED, multisig.toBuffer(), Buffer.from([vaultIndex])],
       programId
@@ -146,7 +146,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
     );
     for (const m of members) await fund(m.publicKey);
 
-    const memberKeys = members.map(m => m.publicKey);
+    const memberKeys = members.map((m) => m.publicKey);
     const sortedMemberKeys = sortMembers(memberKeys);
 
     const multisig: PublicKey = (await program.methods
@@ -176,16 +176,16 @@ describe("Phase 5: Transaction Lifecycle", () => {
     // Collect threshold signatures.
     const sigDatas = members
       .slice(0, opts.threshold)
-      .map(m => signInitMessage(memberKeys, opts.threshold, m));
+      .map((m) => signInitMessage(memberKeys, opts.threshold, m));
     const message = buildInitMessage(memberKeys, opts.threshold);
-    const ed25519Ixs = sigDatas.map(s =>
+    const ed25519Ixs = sigDatas.map((s) =>
       makeEd25519VerifyIx(s.signer, message, Buffer.from(s.signature))
     );
 
     const payer = members[0];
     await program.methods
       .initializeMultisig(sortedMemberKeys, opts.threshold, sigDatas)
-      .accounts({
+      .accountsPartial({
         multisig,
         payer: payer.publicKey,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
@@ -284,7 +284,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
       await program.methods
         .createTransaction(0, message as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -323,7 +323,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .createTransaction(0, message as any)
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             creator: stranger.publicKey,
@@ -366,7 +366,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .createTransaction(0, badMessage as any)
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
@@ -414,7 +414,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .createTransaction(0, dupMessage as any)
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
@@ -456,7 +456,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .createTransaction(0, badMessage as any)
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
@@ -485,7 +485,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const t1 = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, m1 as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: t1.pda,
           creator: members[0].publicKey,
@@ -503,7 +503,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       );
       await program.methods
         .createTransaction(0, m2 as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: t2.pda,
           creator: members[1].publicKey,
@@ -512,8 +512,12 @@ describe("Phase 5: Transaction Lifecycle", () => {
         .signers([members[1]])
         .rpc();
 
-      const acc1 = await (program.account as any).vaultTransaction.fetch(t1.pda);
-      const acc2 = await (program.account as any).vaultTransaction.fetch(t2.pda);
+      const acc1 = await (program.account as any).vaultTransaction.fetch(
+        t1.pda
+      );
+      const acc2 = await (program.account as any).vaultTransaction.fetch(
+        t2.pda
+      );
       expect(acc1.transactionIndex.toString()).to.equal(t1.index.toString());
       expect(acc2.transactionIndex.toString()).to.equal(t2.index.toString());
       expect(acc1.transactionIndex.toString()).to.not.equal(
@@ -537,7 +541,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -549,7 +553,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       // members[1] approves.
       await program.methods
         .approveTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           member: members[1].publicKey,
@@ -577,7 +581,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -590,7 +594,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: stranger.publicKey,
@@ -615,7 +619,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -626,7 +630,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
       await program.methods
         .approveTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           member: members[1].publicKey,
@@ -638,7 +642,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: members[1].publicKey,
@@ -675,7 +679,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -688,7 +692,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       for (const m of [members[0], members[1]]) {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: m.publicKey,
@@ -703,7 +707,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
       await program.methods
         .executeTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           executor: members[0].publicKey,
@@ -711,12 +715,18 @@ describe("Phase 5: Transaction Lifecycle", () => {
         .remainingAccounts([
           { pubkey: vault, isSigner: false, isWritable: true },
           { pubkey: recipient.publicKey, isSigner: false, isWritable: true },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          {
+            pubkey: SystemProgram.programId,
+            isSigner: false,
+            isWritable: false,
+          },
         ])
         .signers([members[0]])
         .rpc();
 
-      const balAfter = await provider.connection.getBalance(recipient.publicKey);
+      const balAfter = await provider.connection.getBalance(
+        recipient.publicKey
+      );
       expect(balAfter - balBefore).to.equal(transferLamports);
 
       const tx = await (program.account as any).vaultTransaction.fetch(pda);
@@ -730,15 +740,11 @@ describe("Phase 5: Transaction Lifecycle", () => {
         preFundVaultLamports: 0.5 * LAMPORTS_PER_SOL,
       });
       const recipient = Keypair.generate();
-      const msg = buildSolTransferMessage(
-        vault,
-        recipient.publicKey,
-        1000
-      );
+      const msg = buildSolTransferMessage(vault, recipient.publicKey, 1000);
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -749,7 +755,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       // Only 1 approval (need 2).
       await program.methods
         .approveTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           member: members[0].publicKey,
@@ -761,7 +767,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .executeTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             executor: members[0].publicKey,
@@ -769,7 +775,11 @@ describe("Phase 5: Transaction Lifecycle", () => {
           .remainingAccounts([
             { pubkey: vault, isSigner: false, isWritable: true },
             { pubkey: recipient.publicKey, isSigner: false, isWritable: true },
-            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+            {
+              pubkey: SystemProgram.programId,
+              isSigner: false,
+              isWritable: false,
+            },
           ])
           .signers([members[0]])
           .rpc();
@@ -795,7 +805,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -806,7 +816,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       for (const m of [members[0], members[1]]) {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: m.publicKey,
@@ -821,7 +831,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       ];
       await program.methods
         .executeTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           executor: members[0].publicKey,
@@ -834,7 +844,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .executeTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             executor: members[0].publicKey,
@@ -864,7 +874,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -875,7 +885,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       for (const m of [members[0], members[1]]) {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: m.publicKey,
@@ -885,7 +895,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       }
       await program.methods
         .executeTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           executor: members[0].publicKey,
@@ -893,7 +903,11 @@ describe("Phase 5: Transaction Lifecycle", () => {
         .remainingAccounts([
           { pubkey: vault, isSigner: false, isWritable: true },
           { pubkey: recipient.publicKey, isSigner: false, isWritable: true },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          {
+            pubkey: SystemProgram.programId,
+            isSigner: false,
+            isWritable: false,
+          },
         ])
         .signers([members[0]])
         .rpc();
@@ -903,7 +917,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
         // Third member tries to approve after execution.
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: members[2].publicKey,
@@ -963,7 +977,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
       await program.methods
         .createTransaction(0, message as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -974,7 +988,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       for (const m of [members[0], members[1]]) {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: m.publicKey,
@@ -987,7 +1001,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
 
       await program.methods
         .executeTransaction(new anchor.BN(index.toString()))
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           executor: members[0].publicKey,
@@ -996,7 +1010,11 @@ describe("Phase 5: Transaction Lifecycle", () => {
           { pubkey: vault, isSigner: false, isWritable: true },
           { pubkey: r1.publicKey, isSigner: false, isWritable: true },
           { pubkey: r2.publicKey, isSigner: false, isWritable: true },
-          { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+          {
+            pubkey: SystemProgram.programId,
+            isSigner: false,
+            isWritable: false,
+          },
         ])
         .signers([members[0]])
         .rpc();
@@ -1022,7 +1040,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       const { pda, index } = await nextTransactionPda(multisig);
       await program.methods
         .createTransaction(0, msg as any)
-        .accounts({
+        .accountsPartial({
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
@@ -1033,7 +1051,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       for (const m of [members[0], members[1]]) {
         await program.methods
           .approveTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             member: m.publicKey,
@@ -1047,7 +1065,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
       try {
         await program.methods
           .executeTransaction(new anchor.BN(index.toString()))
-          .accounts({
+          .accountsPartial({
             multisig,
             transaction: pda,
             executor: members[0].publicKey,
@@ -1055,7 +1073,11 @@ describe("Phase 5: Transaction Lifecycle", () => {
           .remainingAccounts([
             { pubkey: recipient.publicKey, isSigner: false, isWritable: true }, // wrong slot
             { pubkey: vault, isSigner: false, isWritable: true },
-            { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+            {
+              pubkey: SystemProgram.programId,
+              isSigner: false,
+              isWritable: false,
+            },
           ])
           .signers([members[0]])
           .rpc();

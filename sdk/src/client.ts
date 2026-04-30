@@ -39,11 +39,7 @@ export class TrulySelfInitiatingMultisigClient {
   private programId: PublicKey;
   private provider: AnchorProvider;
 
-  constructor(
-    connection: Connection,
-    programId: PublicKey,
-    wallet?: Wallet
-  ) {
+  constructor(connection: Connection, programId: PublicKey, wallet?: Wallet) {
     this.connection = connection;
     this.programId = programId;
 
@@ -83,7 +79,7 @@ export class TrulySelfInitiatingMultisigClient {
 
     // Ensure the keypair is actually a member
     const sortedMembers = sortMembers(members);
-    if (!sortedMembers.some(m => m.equals(memberKeypair.publicKey))) {
+    if (!sortedMembers.some((m) => m.equals(memberKeypair.publicKey))) {
       throw new Error("Keypair is not a member of this multisig");
     }
 
@@ -109,7 +105,9 @@ export class TrulySelfInitiatingMultisigClient {
 
     // Check we have enough signatures
     if (signatures.length < threshold) {
-      errors.push(`Insufficient signatures: need ${threshold}, got ${signatures.length}`);
+      errors.push(
+        `Insufficient signatures: need ${threshold}, got ${signatures.length}`
+      );
     }
 
     // Verify each signature
@@ -118,7 +116,7 @@ export class TrulySelfInitiatingMultisigClient {
 
     for (const sig of signatures) {
       // Check signer is a member
-      if (!sortedMembers.some(m => m.equals(sig.signer))) {
+      if (!sortedMembers.some((m) => m.equals(sig.signer))) {
         errors.push(`Signer ${sig.signer.toString()} is not a member`);
         continue;
       }
@@ -164,7 +162,9 @@ export class TrulySelfInitiatingMultisigClient {
     // Client-side validation
     const validation = this.verifySignatures(members, threshold, signatures);
     if (!validation.valid) {
-      throw new Error(`Signature validation failed:\n${validation.errors.join("\n")}`);
+      throw new Error(
+        `Signature validation failed:\n${validation.errors.join("\n")}`
+      );
     }
 
     // Derive multisig address
@@ -183,7 +183,7 @@ export class TrulySelfInitiatingMultisigClient {
     );
 
     // Convert signatures to the format expected by the program
-    const signaturesForProgram = signatures.map(sig => ({
+    const signaturesForProgram = signatures.map((sig) => ({
       signer: sig.signer,
       signature: Array.from(sig.signature),
       messageHash: Array.from(sig.messageHash),
@@ -259,7 +259,9 @@ export class TrulySelfInitiatingMultisigClient {
    */
   async getMultisig(address: PublicKey): Promise<MultisigConfig | null> {
     try {
-      const account = await (this.program.account as any).multisig.fetch(address);
+      const account = await (this.program.account as any).multisig.fetch(
+        address
+      );
       return {
         members: account.members as PublicKey[],
         threshold: account.threshold as number,
@@ -278,7 +280,11 @@ export class TrulySelfInitiatingMultisigClient {
    * tokens. This is the address users send funds TO.
    */
   deriveVaultAddress(multisigAddress: PublicKey, vaultIndex = 0): PublicKey {
-    const [vault] = deriveVaultAddress(multisigAddress, vaultIndex, this.programId);
+    const [vault] = deriveVaultAddress(
+      multisigAddress,
+      vaultIndex,
+      this.programId
+    );
     return vault;
   }
 
@@ -344,12 +350,12 @@ export class TrulySelfInitiatingMultisigClient {
       numWritableSigners: message.numWritableSigners,
       numWritableNonSigners: message.numWritableNonSigners,
       accountKeys: message.accountKeys,
-      instructions: message.instructions.map(ix => ({
+      instructions: message.instructions.map((ix) => ({
         programIdIndex: ix.programIdIndex,
         accountIndexes: Buffer.from(ix.accountIndexes),
         data: Buffer.from(ix.data),
       })),
-      addressTableLookups: message.addressTableLookups.map(l => ({
+      addressTableLookups: message.addressTableLookups.map((l) => ({
         accountKey: l.accountKey,
         writableIndexes: Buffer.from(l.writableIndexes),
         readonlyIndexes: Buffer.from(l.readonlyIndexes),
@@ -412,7 +418,11 @@ export class TrulySelfInitiatingMultisigClient {
     multisigAddress: PublicKey,
     transactionIndex: bigint,
     executor: Keypair,
-    remainingAccounts?: { pubkey: PublicKey; isSigner: boolean; isWritable: boolean }[]
+    remainingAccounts?: {
+      pubkey: PublicKey;
+      isSigner: boolean;
+      isWritable: boolean;
+    }[]
   ): Promise<string> {
     // Derive transaction PDA
     const [transactionAddress] = PublicKey.findProgramAddressSync(
@@ -446,9 +456,13 @@ export class TrulySelfInitiatingMultisigClient {
   /**
    * Get VaultTransaction data
    */
-  async getTransaction(address: PublicKey): Promise<VaultTransactionData | null> {
+  async getTransaction(
+    address: PublicKey
+  ): Promise<VaultTransactionData | null> {
     try {
-      const account = await (this.program.account as any).vaultTransaction.fetch(address);
+      const account = await (
+        this.program.account as any
+      ).vaultTransaction.fetch(address);
       return {
         multisig: account.multisig as PublicKey,
         index: account.transactionIndex as bigint,

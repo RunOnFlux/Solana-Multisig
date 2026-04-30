@@ -122,4 +122,3 @@ export interface CreateTransactionResult {
   /** Transaction index */
   transactionIndex: bigint;
 }
-
