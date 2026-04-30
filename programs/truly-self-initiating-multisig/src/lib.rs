@@ -1,11 +1,9 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::hash::hash;
-use anchor_lang::solana_program::program::invoke_signed;
-use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::ed25519_program;
-use anchor_lang::solana_program::sysvar::instructions::{
-    self, load_instruction_at_checked,
-};
+use anchor_lang::solana_program::hash::hash;
+use anchor_lang::solana_program::instruction::Instruction;
+use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::solana_program::sysvar::instructions::{self, load_instruction_at_checked};
 
 declare_id!("F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo");
 
@@ -57,10 +55,7 @@ pub mod truly_self_initiating_multisig {
             ErrorCode::InvalidThreshold
         );
 
-        require!(
-            members.len() <= MAX_MEMBERS,
-            ErrorCode::TooManyMembers
-        );
+        require!(members.len() <= MAX_MEMBERS, ErrorCode::TooManyMembers);
 
         // Sort members for deterministic PDA derivation
         let mut sorted_members = members.clone();
@@ -149,7 +144,11 @@ pub mod truly_self_initiating_multisig {
         multisig.is_initialized = true;
         multisig.bump = bump;
 
-        msg!("✅ Multisig initialized with {} members, threshold: {}", members.len(), threshold);
+        msg!(
+            "✅ Multisig initialized with {} members, threshold: {}",
+            members.len(),
+            threshold
+        );
         msg!("✅ Multisig PDA: {}", ctx.accounts.multisig.key());
 
         Ok(())
@@ -181,22 +180,15 @@ pub mod truly_self_initiating_multisig {
         );
 
         // Compute the expected vault PDA + bump for this vault_index.
-        let (expected_vault_pda, vault_bump) =
-            derive_vault_pda(&multisig_key, vault_index);
+        let (expected_vault_pda, vault_bump) = derive_vault_pda(&multisig_key, vault_index);
 
         // Validate message structure.
-        require!(
-            !message.account_keys.is_empty(),
-            ErrorCode::InvalidMessage
-        );
+        require!(!message.account_keys.is_empty(), ErrorCode::InvalidMessage);
         require!(
             message.account_keys.len() <= MAX_TX_ACCOUNT_KEYS,
             ErrorCode::InvalidMessage
         );
-        require!(
-            !message.instructions.is_empty(),
-            ErrorCode::InvalidMessage
-        );
+        require!(!message.instructions.is_empty(), ErrorCode::InvalidMessage);
         require!(
             message.instructions.len() <= MAX_TX_INSTRUCTIONS,
             ErrorCode::InvalidMessage
@@ -218,10 +210,7 @@ pub mod truly_self_initiating_multisig {
         // The vault PDA must be the first signer (index 0). Any instruction
         // that moves vault funds references index 0; we sign for it via PDA
         // using the vault's seeds at execute time.
-        require!(
-            message.num_signers >= 1,
-            ErrorCode::InvalidMessage
-        );
+        require!(message.num_signers >= 1, ErrorCode::InvalidMessage);
         require_keys_eq!(
             message.account_keys[0],
             expected_vault_pda,
@@ -278,8 +267,7 @@ pub mod truly_self_initiating_multisig {
             .iter()
             .map(|l| l.readonly_indexes.len())
             .sum();
-        let combined_count =
-            message.account_keys.len() + total_alt_writable + total_alt_readonly;
+        let combined_count = message.account_keys.len() + total_alt_writable + total_alt_readonly;
         // Solana's runtime caps total accounts per tx at 256 (u8 index space).
         require!(
             combined_count <= MAX_COMBINED_ACCOUNTS,
@@ -288,19 +276,13 @@ pub mod truly_self_initiating_multisig {
         for ix in &message.instructions {
             // Program cannot be the multisig PDA (index 0) — it's a data account,
             // not a program. Defensive; runtime would reject otherwise.
-            require!(
-                ix.program_id_index >= 1,
-                ErrorCode::InvalidMessage
-            );
+            require!(ix.program_id_index >= 1, ErrorCode::InvalidMessage);
             require!(
                 (ix.program_id_index as usize) < combined_count,
                 ErrorCode::InvalidMessage
             );
             for idx in &ix.account_indexes {
-                require!(
-                    (*idx as usize) < combined_count,
-                    ErrorCode::InvalidMessage
-                );
+                require!((*idx as usize) < combined_count, ErrorCode::InvalidMessage);
             }
         }
 
@@ -373,7 +355,8 @@ pub mod truly_self_initiating_multisig {
         // Add approval.
         transaction.approvals.push(ctx.accounts.member.key());
 
-        msg!("Transaction {} approved by {} ({}/{})",
+        msg!(
+            "Transaction {} approved by {} ({}/{})",
             transaction_index,
             ctx.accounts.member.key(),
             transaction.approvals.len(),
@@ -489,8 +472,8 @@ pub mod truly_self_initiating_multisig {
         }
         // ALT-loaded section: trust the client. The runtime already validated
         // the V0 outer tx's ALT contents against each ALT account.
-        for i in static_count..combined_count {
-            combined_pubkeys.push(remaining[i].key());
+        for acc in &remaining[static_count..combined_count] {
+            combined_pubkeys.push(acc.key());
         }
 
         // ============================================================
@@ -528,10 +511,7 @@ pub mod truly_self_initiating_multisig {
             );
 
             let program_id_index = compiled.program_id_index as usize;
-            require!(
-                program_id_index < combined_count,
-                ErrorCode::InvalidMessage
-            );
+            require!(program_id_index < combined_count, ErrorCode::InvalidMessage);
             let program_id = combined_pubkeys[program_id_index];
 
             // Build AccountMetas + AccountInfos for the CPI.
@@ -685,9 +665,7 @@ fn verify_ed25519_signature(
     // signature member1 made for ANY message, rebound to our canonical init
     // message via offset/index manipulation.
     require!(
-        sig_ix_index == u16::MAX
-            && pubkey_ix_index == u16::MAX
-            && msg_ix_index == u16::MAX,
+        sig_ix_index == u16::MAX && pubkey_ix_index == u16::MAX && msg_ix_index == u16::MAX,
         ErrorCode::InvalidSignature
     );
 
@@ -697,10 +675,7 @@ fn verify_ed25519_signature(
         ErrorCode::InvalidSignature
     );
     let ix_signature = &ix_data[sig_offset..sig_offset + 64];
-    require!(
-        ix_signature == signature,
-        ErrorCode::InvalidSignature
-    );
+    require!(ix_signature == signature, ErrorCode::InvalidSignature);
 
     // Verify the public key bytes match
     require!(
@@ -708,10 +683,7 @@ fn verify_ed25519_signature(
         ErrorCode::InvalidSignature
     );
     let ix_pubkey = &ix_data[pubkey_offset..pubkey_offset + 32];
-    require!(
-        ix_pubkey == pubkey,
-        ErrorCode::InvalidSignature
-    );
+    require!(ix_pubkey == pubkey, ErrorCode::InvalidSignature);
 
     // Verify the message bytes match
     require!(
@@ -719,10 +691,7 @@ fn verify_ed25519_signature(
         ErrorCode::InvalidSignature
     );
     let ix_message = &ix_data[msg_offset..msg_offset + msg_size];
-    require!(
-        ix_message == message,
-        ErrorCode::InvalidSignature
-    );
+    require!(ix_message == message, ErrorCode::InvalidSignature);
 
     // If we get here, the Ed25519 program has verified this signature!
     // (The Ed25519 program instruction would have failed if invalid)
@@ -994,21 +963,12 @@ pub struct ExecuteTransaction<'info> {
 /// Derive multisig PDA from members and threshold
 /// CRITICAL: NO PRIVATE KEY GENERATION - only PDA derivation
 /// This is what makes it truly self-initiating and secure
-pub fn derive_multisig_pda(
-    members: &[Pubkey],
-    threshold: u8,
-) -> Result<(Pubkey, u8)> {
+pub fn derive_multisig_pda(members: &[Pubkey], threshold: u8) -> Result<(Pubkey, u8)> {
     let sorted_members = sort_members(members);
     let member_hash = hash_members(&sorted_members);
 
-    let (pda, bump) = Pubkey::find_program_address(
-        &[
-            b"multisig",
-            &member_hash[..8],
-            &[threshold],
-        ],
-        &crate::ID,
-    );
+    let (pda, bump) =
+        Pubkey::find_program_address(&[b"multisig", &member_hash[..8], &[threshold]], &crate::ID);
 
     Ok((pda, bump))
 }
@@ -1017,10 +977,7 @@ pub fn derive_multisig_pda(
 /// and vault_index. Each multisig can have up to 256 vaults (vault_index = 0..255).
 /// The vault holds SOL + SPL token accounts; SystemProgram::transfer from a vault
 /// works because it's system-owned with empty data.
-pub fn derive_vault_pda(
-    multisig: &Pubkey,
-    vault_index: u8,
-) -> (Pubkey, u8) {
+pub fn derive_vault_pda(multisig: &Pubkey, vault_index: u8) -> (Pubkey, u8) {
     Pubkey::find_program_address(
         &[VAULT_PDA_SEED, multisig.as_ref(), &[vault_index]],
         &crate::ID,
