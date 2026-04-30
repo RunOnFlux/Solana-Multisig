@@ -882,7 +882,7 @@ pub struct InitializeMultisig<'info> {
     /// Instructions Sysvar for Ed25519 signature verification
     /// CHECK: This is the Instructions Sysvar
     #[account(address = instructions::ID)]
-    pub instructions_sysvar: AccountInfo<'info>,
+    pub instructions_sysvar: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
