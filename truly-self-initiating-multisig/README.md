@@ -1,473 +1,136 @@
 # Truly Self-Initiating Multisig
 
-A secure, truly self-initiating multisig implementation on Solana that eliminates single creator dependency and prevents front-running attacks.
+A Solana multisig program where the multisig address is **deterministically derived from members + threshold**. Anyone can derive the address before any on-chain action; anyone can pre-fund the vault; only threshold member signatures can initialize.
 
-## 🎯 Key Features
+Program ID: `F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo`
 
-- ✅ **Truly Self-Initiating**: No single creator required
-- ✅ **Deterministic Addresses**: Pre-computable addresses before initialization
-- ✅ **Pre-Funding Support**: Send funds before initialization
-- ✅ **Front-Run Proof**: No derivable private keys
-- ✅ **Threshold Security**: N-of-M signature requirement enforced on-chain
-- ✅ **On-Chain Validation**: All signatures verified by Solana runtime
-- ✅ **No Single Point of Failure**: Requires collective approval
+## Why "self-initiating"
 
-## 🚀 Quick Start
+Standard Solana multisigs (Squads V4 etc.) require a creator account to call `multisig_create_v2` with a random `create_key`. The address is unknowable until creation, and the creator is a single point of trust.
 
-### Prerequisites
+Here, the multisig PDA is derived from `(sorted_members, threshold)` directly:
 
-```bash
-# Solana CLI
-solana --version  # >= 1.18.0
-
-# Anchor
-anchor --version  # >= 0.31.0
-
-# Node.js
-node --version   # >= 18.0.0
+```
+multisig_pda = find_program_address(
+  [b"multisig", hash(sorted_members)[..8], &[threshold]],
+  program_id
+)
 ```
 
-### Installation
+Implications:
+- ✅ Address is knowable BEFORE any on-chain action — pre-fundable
+- ✅ No single creator — init requires threshold member signatures
+- ✅ Same `(members, threshold)` always yields the same address — no front-run
+- ✅ Front-run protection: an attacker with different config derives a different PDA
 
-```bash
-# Clone repository
-git clone <repo-url>
-cd truly-self-initiating-multisig
+## Architecture
 
-# Install dependencies
-npm install
+Two PDA types per multisig:
 
-# Build program
-anchor build
+| PDA | Holds | Owner | Purpose |
+|---|---|---|---|
+| **Multisig** | members, threshold, tx counter | Our program | Governance / config |
+| **Vault** | SOL + SPL tokens (via ATAs) | SystemProgram (no data) | Funds storage |
 
-# Run tests
-anchor test
+```
+multisig_pda = [b"multisig", hash(members)[..8], &[threshold]]
+vault_pda    = [b"vault", multisig_pda, &[vault_index]]   // vault_index 0..255
 ```
 
-### Basic Usage
+Users send funds TO the vault address. `SystemProgram::transfer` from the vault works because it's system-owned with empty data. Each multisig supports up to 256 vault sub-accounts (most use cases use only `vault_index = 0`).
+
+## Lifecycle
+
+1. **Derive** `(multisig_pda, vault_pda)` off-chain from members + threshold
+2. **Pre-fund** the vault address with SOL or SPL (anyone, before init)
+3. **Init**: threshold members sign canonical init message off-chain; submit `initialize_multisig` tx with one Ed25519 verify ix per signature preceding the program ix. Multisig PDA is created with config.
+4. **Propose**: a member calls `create_transaction(vault_index, message)` storing a V0-style transaction message (header + account_keys + compiled instructions + ALT lookups) on a `VaultTransaction` PDA.
+5. **Approve**: each member calls `approve_transaction(index)` once. Approvals accumulate.
+6. **Execute**: when approvals ≥ threshold, anyone calls `execute_transaction(index)`. The program flushes `executed = true` (re-entrancy guard), then iterates compiled instructions and CPIs each one with the **vault PDA as signer** via `invoke_signed`.
+
+## Quick start
 
 ```typescript
-import { Connection, Keypair } from "@solana/web3.js";
-import { TrulySelfInitiatingMultisigClient } from "@truly-self-initiating/sdk";
+import { TrulySelfInitiatingMultisigClient, deriveVaultAddress } from "@truly-self-initiating/sdk";
+import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
 
-// Setup
-const connection = new Connection("https://api.mainnet-beta.solana.com");
-const programId = new PublicKey("F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo");
 const client = new TrulySelfInitiatingMultisigClient(connection, programId);
 
-// 1. Derive deterministic address
-const members = [alice.publicKey, bob.publicKey, charlie.publicKey];
-const threshold = 2;
-const multisigAddress = client.deriveAddress(members, threshold);
+// Derive addresses (free, off-chain)
+const multisig = client.deriveAddress(members, threshold);
+const [vault] = deriveVaultAddress(multisig, 0, programId);
 
-// 2. Pre-fund (optional)
-await client.preFund(multisigAddress, 1 * LAMPORTS_PER_SOL, alice);
+// Pre-fund vault, collect signatures off-chain, then:
+await client.initialize(members, threshold, signatures, payer);
 
-// 3. Collect off-chain signatures
-const sig1 = client.createSignature(members, threshold, alice);
-const sig2 = client.createSignature(members, threshold, bob);
+// Propose a SOL transfer
+const transferIx = SystemProgram.transfer({
+  fromPubkey: vault,
+  toPubkey: recipient,
+  lamports: 0.1 * 1e9,
+});
+const proposal = await client.createTransaction(multisig, 0, [transferIx], member);
 
-// 4. Initialize on-chain
-await client.initialize(members, threshold, [sig1, sig2], alice);
+// Threshold approvals + execute
+await client.approveTransaction(multisig, proposal.transactionIndex, member1);
+await client.approveTransaction(multisig, proposal.transactionIndex, member2);
+await client.executeTransaction(multisig, proposal.transactionIndex, executor, [
+  { pubkey: vault, isSigner: false, isWritable: true },
+  { pubkey: recipient, isSigner: false, isWritable: true },
+  { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+]);
 ```
 
-## 📖 Documentation
+See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 
-### Architecture Overview
+## Security
 
-The Truly Self-Initiating Multisig consists of three main components:
+| Property | Mechanism |
+|---|---|
+| Front-run protection | Multisig PDA is unique per `(members, threshold)`; init requires threshold sigs of canonical message |
+| No deterministic private keys | Pure PDA derivation — no `Keypair::fromSeed` |
+| Init signature replay protection | Ed25519 verification requires `instruction_index = 0xFFFF` (current ix) — prevents binding cryptographic verification to unrelated data |
+| Re-entrancy | `executed = true` is flushed to on-chain data via `Account::exit()` before the CPI loop |
+| Threshold enforcement | Approvals are counted on-chain; execute requires `approvals.len() >= threshold` |
+| Cross-multisig replay | Init signatures bind `(members, threshold)` into the message |
+| Account validation | Anchor's seeds + bump constraints + owner check on every account |
 
-1. **Solana Program** (Rust): On-chain logic for validation and state management
-2. **TypeScript SDK**: Client library for interaction
-3. **Test Suite**: Comprehensive security and functional tests
+## Limits
 
-#### Program Structure
+| Limit | Value | Rationale |
+|---|---|---|
+| `MAX_MEMBERS` | 20 | Practical for treasury governance |
+| `MAX_TX_ACCOUNT_KEYS` | 32 | Static account_keys per proposal |
+| `MAX_TX_INSTRUCTIONS` | 16 | Per proposal (CU-limited at execute) |
+| `MAX_INSTRUCTION_ACCOUNTS` | 64 | Per instruction (1-byte indexes) |
+| `MAX_INSTRUCTION_DATA_LEN` | 1024 | Bytes per instruction |
+| `MAX_ADDRESS_TABLE_LOOKUPS` | 4 | ALTs per proposal |
+| `MAX_INDEXES_PER_LOOKUP` | 28 | Each (writable + readonly) per ALT |
+| `MAX_COMBINED_ACCOUNTS` | 256 | Solana's u8 index space cap |
 
-```
-programs/truly-self-initiating-multisig/
-└── src/
-    └── lib.rs          # Core program logic
-        ├── Instructions
-        │   ├── derive_address()
-        │   ├── initialize_multisig()
-        │   ├── create_transaction()
-        │   ├── approve_transaction()
-        │   └── execute_transaction()
-        └── State Accounts
-            ├── Multisig
-            └── Transaction
-```
-
-#### Key Concepts
-
-**PDA Derivation**:
-```rust
-Seeds = [
-    b"multisig",                    // Domain separator
-    &hash_members(sorted_members),  // Member hash (8 bytes)
-    &[threshold],                   // Threshold value
-]
-```
-
-**No Private Keys**: Unlike traditional approaches, this uses **only** PDA derivation. No `Keypair::fromSeed()` means no front-running risk.
-
-**On-Chain Validation**: Member signatures are verified by Solana runtime, not client code.
-
-### Security Model
-
-#### Security Guarantees
-
-1. **Deterministic Addresses**: Same config always produces same address
-2. **Pre-Funding Safe**: Funds sent before initialization are secure
-3. **Threshold Enforcement**: Requires N valid signatures to initialize
-4. **Front-Run Protection**: No derivable private key exists
-5. **Member Authorization**: Only designated members can control multisig
-6. **Re-initialization Prevention**: Once initialized, cannot be changed
-
-#### Attack Vectors (All Mitigated)
-
-| Attack | Mitigation |
-|--------|------------|
-| Front-running | Different configs = different PDAs |
-| Signature forgery | Ed25519 verification on-chain |
-| Insufficient signatures | Threshold check enforced |
-| Duplicate signatures | On-chain duplicate detection |
-| Re-initialization | Account already exists error |
-| Non-member signing | Member list validation |
-
-### API Reference
-
-#### SDK Client
-
-##### `constructor(connection, programId, wallet?)`
-
-Creates a new client instance.
-
-```typescript
-const client = new TrulySelfInitiatingMultisigClient(
-  connection,
-  programId,
-  wallet  // optional
-);
-```
-
-##### `deriveAddress(members, threshold): PublicKey`
-
-Derives the deterministic multisig address.
-
-```typescript
-const address = client.deriveAddress(
-  [alice.publicKey, bob.publicKey],
-  2
-);
-```
-
-##### `createSignature(members, threshold, memberKeypair): SignatureData`
-
-Creates an off-chain signature for initialization.
-
-```typescript
-const signature = client.createSignature(
-  members,
-  threshold,
-  alice  // member's keypair
-);
-```
-
-##### `verifySignatures(members, threshold, signatures): ValidationResult`
-
-Validates signatures client-side before sending to chain.
-
-```typescript
-const { valid, errors } = client.verifySignatures(
-  members,
-  threshold,
-  [sig1, sig2]
-);
-```
-
-##### `initialize(members, threshold, signatures, payer): Promise<InitializeResult>`
-
-Initializes the multisig on-chain.
-
-```typescript
-const result = await client.initialize(
-  members,
-  threshold,
-  [sig1, sig2],
-  payer  // pays transaction fee
-);
-```
-
-##### `preFund(address, amount, funder): Promise<string>`
-
-Sends SOL to multisig address before initialization.
-
-```typescript
-const signature = await client.preFund(
-  multisigAddress,
-  1 * LAMPORTS_PER_SOL,
-  funder
-);
-```
-
-##### `getMultisig(address): Promise<MultisigConfig | null>`
-
-Fetches multisig account data.
-
-```typescript
-const multisig = await client.getMultisig(multisigAddress);
-console.log(multisig.members, multisig.threshold);
-```
-
-##### `createTransaction(multisigAddress, instructions, creator): Promise<CreateTransactionResult>`
-
-Creates a transaction proposal.
-
-```typescript
-const result = await client.createTransaction(
-  multisigAddress,
-  [instruction1, instruction2],
-  creator
-);
-```
-
-##### `approveTransaction(multisigAddress, transactionIndex, member): Promise<string>`
-
-Approves a transaction proposal.
-
-```typescript
-await client.approveTransaction(
-  multisigAddress,
-  BigInt(0),
-  member
-);
-```
-
-##### `executeTransaction(multisigAddress, transactionIndex, executor): Promise<string>`
-
-Executes an approved transaction.
-
-```typescript
-await client.executeTransaction(
-  multisigAddress,
-  BigInt(0),
-  executor
-);
-```
-
-### Integration Guide
-
-#### Step 1: Add Dependency
+## Build + test
 
 ```bash
-npm install @truly-self-initiating/sdk @solana/web3.js
+anchor build              # compile the program
+anchor deploy             # deploy (devnet/localnet)
+anchor test               # run the test suite
 ```
 
-#### Step 2: Initialize Client
+Tests live in `tests/`:
+- `phase1-basic.ts` — address derivation
+- `phase4-integration.ts` — init flow scenarios (happy paths)
+- `phase4-security.ts` — init failure scenarios (attack vectors)
+- `phase4-unit.ts` — view function unit tests
+- `phase5-transactions.ts` — full proposal lifecycle (create / approve / execute)
 
-```typescript
-import { Connection } from "@solana/web3.js";
-import { TrulySelfInitiatingMultisigClient } from "@truly-self-initiating/sdk";
+## Status
 
-const connection = new Connection(clusterUrl);
-const client = new TrulySelfInitiatingMultisigClient(
-  connection,
-  programId
-);
-```
+- ✅ Compiles clean (`cargo check`)
+- ✅ 5 rounds of internal audit (5 bugs found and fixed)
+- ⚠️ No external security audit yet — **commission one before any meaningful TVL**
 
-#### Step 3: Coordinate Off-Chain
+Suggested audit firms for Solana/Anchor: OtterSec, Neodyme, Halborn. Budget ~$30-50k, timeline 4-8 weeks.
 
-**Important**: Members must coordinate off-chain to:
-1. Agree on member list and threshold
-2. Compute deterministic address
-3. Optionally pre-fund the address
-4. Collect signatures from threshold members
-5. Submit initialization transaction
+## License
 
-```typescript
-// All parties compute same address
-const multisigAddress = client.deriveAddress(members, threshold);
-
-// Each member signs independently
-const aliceSignature = client.createSignature(members, threshold, alice);
-// ... send aliceSignature to coordinator
-
-const bobSignature = client.createSignature(members, threshold, bob);
-// ... send bobSignature to coordinator
-```
-
-#### Step 4: Initialize On-Chain
-
-```typescript
-// Any funded account can submit (doesn't need to be a member)
-await client.initialize(
-  members,
-  threshold,
-  [aliceSignature, bobSignature],
-  payer  // Just pays transaction fee
-);
-```
-
-### Deployment Guide
-
-#### Local Development
-
-```bash
-# Start local validator
-solana-test-validator --reset
-
-# Deploy program
-anchor deploy
-
-# Run tests
-anchor test --skip-local-validator
-```
-
-#### Devnet Deployment
-
-```bash
-# Configure to devnet
-solana config set --url devnet
-
-# Airdrop SOL for deployment
-solana airdrop 2
-
-# Build and deploy
-anchor build
-anchor deploy --provider.cluster devnet
-```
-
-#### Mainnet Deployment
-
-```bash
-# Configure to mainnet
-solana config set --url mainnet-beta
-
-# Ensure you have SOL for deployment
-solana balance
-
-# Build with mainnet program ID
-anchor build
-
-# Deploy (requires ~2-3 SOL)
-anchor deploy --provider.cluster mainnet-beta
-
-# Verify deployment
-solana program show <PROGRAM_ID>
-```
-
-**Security Checklist Before Mainnet**:
-- ✅ All tests passing
-- ✅ Security audit completed
-- ✅ Program verified on-chain
-- ✅ Upgrade authority managed securely
-- ✅ Emergency procedures documented
-
-### Troubleshooting
-
-#### Issue: "Insufficient signatures"
-
-**Cause**: Less than threshold signatures provided.
-
-**Solution**: Ensure you collect at least `threshold` valid signatures before initializing.
-
-#### Issue: "Invalid signature"
-
-**Cause**: Signature doesn't match the initialization message.
-
-**Solution**: 
-- Verify member list is sorted identically
-- Check threshold value matches
-- Ensure using same message format
-
-#### Issue: "Account already exists"
-
-**Cause**: Multisig already initialized.
-
-**Solution**: This is expected behavior. Cannot re-initialize. Derive a different address or use existing multisig.
-
-#### Issue: "Unauthorized signer"
-
-**Cause**: Signature from account not in member list.
-
-**Solution**: Verify signer is in the members array.
-
-#### Issue: Rate limited on devnet
-
-**Cause**: Too many airdrop requests.
-
-**Solution**:
-```bash
-# Use a faucet
-# Or fund manually from another account
-solana transfer <ADDRESS> 1 --allow-unfunded-recipient
-```
-
-## 📚 Examples
-
-See `sdk/examples/` for complete examples:
-
-- `full-flow.ts` - Complete initialization flow
-- `basic-2of2.ts` - Simple 2-of-2 multisig
-- `pre-funded-treasury.ts` - Pre-funding example
-- `complex-transaction.ts` - Multi-instruction transaction
-
-## 🧪 Testing
-
-```bash
-# Run all tests
-anchor test
-
-# Run specific test suite
-anchor test --skip-local-validator tests/phase4-security.ts
-
-# Run with coverage
-anchor test --coverage
-```
-
-## 📊 Performance
-
-- **Program Size**: 292KB
-- **Initialization Cost**: ~0.002 SOL (rent + transaction)
-- **Transaction Approval**: ~0.0001 SOL per approval
-- **Max Members**: 10
-- **Max Instructions per Transaction**: 8
-
-## 🔒 Security
-
-This implementation has been designed with security as the top priority:
-
-- **No Private Keys**: Uses only PDAs, no `Keypair::fromSeed()`
-- **On-Chain Validation**: Solana runtime verifies all signatures
-- **Comprehensive Tests**: 58 test cases covering all attack vectors
-- **Audited**: [Link to audit report when available]
-
-## 🤝 Contributing
-
-Contributions welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass
-5. Submit a pull request
-
-## 📄 License
-
-MIT License - see LICENSE file for details
-
-## 🙋 Support
-
-- **Issues**: GitHub Issues
-- **Discussions**: GitHub Discussions
-- **Security**: security@example.com (for responsible disclosure)
-
-## 🔗 Links
-
-- **Program ID (Mainnet)**: `F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo`
-- **Documentation**: [Link to docs]
-- **Examples**: [Link to examples]
-- **Security Audit**: [Link to audit]
-
+MIT
