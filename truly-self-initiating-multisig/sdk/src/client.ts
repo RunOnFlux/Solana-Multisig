@@ -15,16 +15,19 @@ import {
   InitializeResult,
   CreateTransactionResult,
   MultisigConfig,
-  TransactionData,
+  VaultTransactionData,
+  TransactionMessage,
 } from "./types";
 import {
   deriveMultisigAddress,
+  deriveVaultAddress,
   createInitSignature,
   createInitializationMessage,
   sortMembers,
   validateConfig,
   verifySignature,
   createEd25519Instructions,
+  buildMessageFromInstructions,
 } from "./utils";
 
 /**
@@ -270,20 +273,60 @@ export class TrulySelfInitiatingMultisigClient {
   }
 
   /**
-   * Create a transaction proposal
+   * Derive the vault PDA at `vaultIndex` for a given multisig.
+   * Vaults are SystemProgram-owned PDAs with no data — they hold SOL + SPL
+   * tokens. This is the address users send funds TO.
+   */
+  deriveVaultAddress(multisigAddress: PublicKey, vaultIndex = 0): PublicKey {
+    const [vault] = deriveVaultAddress(multisigAddress, vaultIndex, this.programId);
+    return vault;
+  }
+
+  /**
+   * Create a transaction proposal from raw web3.js instructions targeting
+   * a specific vault.
+   *
+   * Builds a V0-style TransactionMessage internally with no ALT support.
+   * The vault PDA at `vaultIndex` is forced to be the writable signer at
+   * `account_keys[0]` — instructions referencing the vault use index 0.
+   *
+   * For ALT-aware proposals, use {@link createTransactionFromMessage} and
+   * construct the TransactionMessage manually.
    */
   async createTransaction(
     multisigAddress: PublicKey,
+    vaultIndex: number,
     instructions: TransactionInstruction[],
     creator: Keypair
   ): Promise<CreateTransactionResult> {
-    // Get multisig data
+    const vaultPda = this.deriveVaultAddress(multisigAddress, vaultIndex);
+    const message = buildMessageFromInstructions(vaultPda, instructions);
+    return this.createTransactionFromMessage(
+      multisigAddress,
+      vaultIndex,
+      message,
+      creator
+    );
+  }
+
+  /**
+   * Create a transaction proposal from a pre-built V0-style TransactionMessage.
+   *
+   * Use this when you need ALT support (set `addressTableLookups` on the
+   * message) or need full control over account ordering and signer/writable
+   * flags. `account_keys[0]` MUST be the vault PDA at `vaultIndex`.
+   */
+  async createTransactionFromMessage(
+    multisigAddress: PublicKey,
+    vaultIndex: number,
+    message: TransactionMessage,
+    creator: Keypair
+  ): Promise<CreateTransactionResult> {
     const multisig = await this.getMultisig(multisigAddress);
     if (!multisig) {
       throw new Error("Multisig not found");
     }
 
-    // Derive transaction PDA
     const transactionIndex = multisig.transactionIndex + BigInt(1);
     const [transactionAddress] = PublicKey.findProgramAddressSync(
       [
@@ -294,24 +337,31 @@ export class TrulySelfInitiatingMultisigClient {
       this.programId
     );
 
-    // Convert instructions to serializable format
-    const serializableInstructions = instructions.map(ix => ({
-      programId: ix.programId,
-      accounts: ix.keys.map(k => ({
-        pubkey: k.pubkey,
-        isSigner: k.isSigner,
-        isWritable: k.isWritable,
+    // Convert message to the on-chain Anchor encoding (numeric arrays for
+    // Vec<u8> fields, plain pubkeys for Vec<Pubkey>).
+    const onchainMessage = {
+      numSigners: message.numSigners,
+      numWritableSigners: message.numWritableSigners,
+      numWritableNonSigners: message.numWritableNonSigners,
+      accountKeys: message.accountKeys,
+      instructions: message.instructions.map(ix => ({
+        programIdIndex: ix.programIdIndex,
+        accountIndexes: Buffer.from(ix.accountIndexes),
+        data: Buffer.from(ix.data),
       })),
-      data: Array.from(ix.data),
-    }));
+      addressTableLookups: message.addressTableLookups.map(l => ({
+        accountKey: l.accountKey,
+        writableIndexes: Buffer.from(l.writableIndexes),
+        readonlyIndexes: Buffer.from(l.readonlyIndexes),
+      })),
+    };
 
-    // Create transaction
     const tx = await this.program.methods
-      .createTransaction(serializableInstructions)
+      .createTransaction(vaultIndex, onchainMessage)
       .accounts({
         multisig: multisigAddress,
         transaction: transactionAddress,
-        member: creator.publicKey,
+        creator: creator.publicKey,
         systemProgram: SystemProgram.programId,
       })
       .signers([creator])
@@ -320,7 +370,7 @@ export class TrulySelfInitiatingMultisigClient {
     return {
       signature: tx,
       transactionAddress,
-      transactionIndex: transactionIndex,
+      transactionIndex,
     };
   }
 
@@ -394,17 +444,21 @@ export class TrulySelfInitiatingMultisigClient {
   }
 
   /**
-   * Get transaction data
+   * Get VaultTransaction data
    */
-  async getTransaction(address: PublicKey): Promise<TransactionData | null> {
+  async getTransaction(address: PublicKey): Promise<VaultTransactionData | null> {
     try {
-      const account = await (this.program.account as any).transaction.fetch(address);
+      const account = await (this.program.account as any).vaultTransaction.fetch(address);
       return {
         multisig: account.multisig as PublicKey,
         index: account.transactionIndex as bigint,
-        instructions: account.instructions as any[],
-        approvers: account.approvals as PublicKey[],
+        creator: account.creator as PublicKey,
+        bump: account.bump as number,
+        vaultIndex: account.vaultIndex as number,
+        vaultBump: account.vaultBump as number,
         executed: account.executed as boolean,
+        approvers: account.approvals as PublicKey[],
+        message: account.message as TransactionMessage,
       };
     } catch (e) {
       return null;

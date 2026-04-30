@@ -195,18 +195,32 @@ describe("Unit Tests", () => {
       console.log(`✅ 2-member multisig supported`);
     });
 
-    it("should support maximum members (10)", async () => {
-      const members = Array.from({ length: 10 }, () => Keypair.generate().publicKey);
-      const sorted = [...members].sort((a, b) => 
+    it("should support maximum members (20)", async () => {
+      const members = Array.from({ length: 20 }, () => Keypair.generate().publicKey);
+      const sorted = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
       const address = await program.methods
-        .deriveAddress(sorted, 5)
+        .deriveAddress(sorted, 8)
         .view();
 
       expect(address).to.be.instanceOf(PublicKey);
-      console.log(`✅ 10-member multisig supported`);
+      console.log(`✅ 20-member multisig supported`);
+    });
+
+    it("should support 8-of-15 multisig", async () => {
+      const members = Array.from({ length: 15 }, () => Keypair.generate().publicKey);
+      const sorted = [...members].sort((a, b) =>
+        Buffer.compare(a.toBuffer(), b.toBuffer())
+      );
+
+      const address = await program.methods
+        .deriveAddress(sorted, 8)
+        .view();
+
+      expect(address).to.be.instanceOf(PublicKey);
+      console.log(`✅ 8-of-15 multisig supported`);
     });
   });
 

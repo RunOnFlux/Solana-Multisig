@@ -1,7 +1,7 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
-import { Keypair, PublicKey, SystemProgram, LAMPORTS_PER_SOL } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, LAMPORTS_PER_SOL, TransactionInstruction, SYSVAR_INSTRUCTIONS_PUBKEY } from "@solana/web3.js";
 import { expect } from "chai";
 import * as crypto from "crypto";
 import * as nacl from "tweetnacl";
@@ -15,6 +15,55 @@ describe("Integration Tests", () => {
   anchor.setProvider(provider);
 
   const program = anchor.workspace.TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+
+  const ED25519_PROGRAM_ID = new PublicKey(
+    "Ed25519SigVerify111111111111111111111111111"
+  );
+
+  function buildInitMessageBytes(members: PublicKey[], threshold: number): Buffer {
+    const sorted = [...members].sort((a, b) => Buffer.compare(a.toBuffer(), b.toBuffer()));
+    return Buffer.concat([
+      Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
+      ...sorted.map(m => Buffer.from(m.toBytes())),
+      Buffer.from([threshold]),
+    ]);
+  }
+
+  function makeEd25519VerifyIx(
+    pubkey: PublicKey,
+    message: Buffer,
+    signature: Buffer
+  ): TransactionInstruction {
+    const PUBKEY_OFFSET = 16;
+    const SIG_OFFSET = PUBKEY_OFFSET + 32;
+    const MSG_OFFSET = SIG_OFFSET + 64;
+    const data = Buffer.alloc(MSG_OFFSET + message.length);
+    data.writeUInt8(1, 0);
+    data.writeUInt8(0, 1);
+    data.writeUInt16LE(SIG_OFFSET, 2);
+    data.writeUInt16LE(0xffff, 4);
+    data.writeUInt16LE(PUBKEY_OFFSET, 6);
+    data.writeUInt16LE(0xffff, 8);
+    data.writeUInt16LE(MSG_OFFSET, 10);
+    data.writeUInt16LE(message.length, 12);
+    data.writeUInt16LE(0xffff, 14);
+    pubkey.toBuffer().copy(data, PUBKEY_OFFSET);
+    signature.copy(data, SIG_OFFSET);
+    message.copy(data, MSG_OFFSET);
+    return new TransactionInstruction({ keys: [], programId: ED25519_PROGRAM_ID, data });
+  }
+
+  function makeEd25519Ixs(
+    members: PublicKey[],
+    threshold: number,
+    sigs: Array<{ signer: PublicKey; signature: number[] }>
+  ): TransactionInstruction[] {
+    const message = buildInitMessageBytes(members, threshold);
+    return sigs.map(s =>
+      makeEd25519VerifyIx(s.signer, message, Buffer.from(s.signature))
+    );
+  }
+
 
   async function fundAccount(pubkey: PublicKey, amount: number = 2 * LAMPORTS_PER_SOL) {
     try {
@@ -95,6 +144,7 @@ describe("Integration Tests", () => {
           multisig: multisigAddress,
           payer: member1.publicKey,
         })
+        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
         .signers([member1])
         .rpc();
 
@@ -142,6 +192,7 @@ describe("Integration Tests", () => {
           multisig: multisigAddress,
           payer: member1.publicKey,
         })
+        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
         .signers([member1])
         .rpc();
 
@@ -186,6 +237,7 @@ describe("Integration Tests", () => {
           multisig: multisigAddress,
           payer: member1.publicKey,
         })
+        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2, sig3]))
         .signers([member1])
         .rpc();
 
@@ -227,6 +279,7 @@ describe("Integration Tests", () => {
           multisig: multisigAddress,
           payer: payer.publicKey, // Non-member paying
         })
+        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
         .signers([payer])
         .rpc();
 
@@ -270,6 +323,7 @@ describe("Integration Tests", () => {
           multisig: multisigAddress,
           payer: members[0].publicKey,
         })
+        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, signatures))
         .signers([members[0]])
         .rpc();
 
@@ -323,6 +377,7 @@ describe("Integration Tests", () => {
           multisig: multisigAddress,
           payer: member1.publicKey,
         })
+        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
         .signers([member1])
         .rpc();
 

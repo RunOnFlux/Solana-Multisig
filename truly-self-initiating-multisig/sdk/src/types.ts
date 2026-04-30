@@ -30,41 +30,73 @@ export interface MultisigConfig {
 }
 
 /**
- * Transaction proposal data
- * Matches the Rust Transaction struct
+ * VaultTransaction account data.
+ * Matches the on-chain VaultTransaction struct.
  */
-export interface TransactionData {
+export interface VaultTransactionData {
   /** Multisig this transaction belongs to */
   multisig: PublicKey;
   /** Transaction index */
   index: bigint;
-  /** Instructions to execute */
-  instructions: SerializableInstruction[];
-  /** Members who have approved */
-  approvers: PublicKey[];
+  /** Member who created the proposal */
+  creator: PublicKey;
+  /** PDA bump */
+  bump: number;
+  /** Vault sub-account this proposal targets */
+  vaultIndex: number;
+  /** Cached vault PDA bump */
+  vaultBump: number;
   /** Whether the transaction has been executed */
   executed: boolean;
+  /** Members who have approved */
+  approvers: PublicKey[];
+  /** The compact V0-style transaction message */
+  message: TransactionMessage;
 }
 
 /**
- * Serializable instruction format
+ * V0-style transaction message stored in a VaultTransaction.
+ * Mirrors Solana's MessageV0 minus recent_blockhash and fee_payer.
  */
-export interface SerializableInstruction {
-  /** Program ID to invoke */
-  programId: PublicKey;
-  /** Account metas */
-  accounts: AccountMeta[];
+export interface TransactionMessage {
+  /** Total signer count (signer accounts come first in account_keys) */
+  numSigners: number;
+  /** Number of writable signers */
+  numWritableSigners: number;
+  /** Number of writable non-signers */
+  numWritableNonSigners: number;
+  /** Static account keys (multisig PDA must be at index 0) */
+  accountKeys: PublicKey[];
+  /** Compiled instructions referencing accounts by index */
+  instructions: CompiledInstruction[];
+  /** Address Lookup Table references */
+  addressTableLookups: MessageAddressTableLookup[];
+}
+
+/**
+ * Compiled instruction format (V0-style).
+ * Accounts are referenced by 1-byte index into the combined account list
+ * (static account_keys + ALT-loaded writable + ALT-loaded readonly).
+ */
+export interface CompiledInstruction {
+  /** Index of the program in the combined account list */
+  programIdIndex: number;
+  /** Indices of the instruction's accounts in the combined list */
+  accountIndexes: Uint8Array;
   /** Instruction data */
   data: Uint8Array;
 }
 
 /**
- * Account metadata for instructions
+ * Address Lookup Table reference for compactly loading many accounts.
  */
-export interface AccountMeta {
-  pubkey: PublicKey;
-  isSigner: boolean;
-  isWritable: boolean;
+export interface MessageAddressTableLookup {
+  /** The on-chain ALT account address */
+  accountKey: PublicKey;
+  /** Indices into the ALT pointing to writable accounts */
+  writableIndexes: Uint8Array;
+  /** Indices into the ALT pointing to readonly accounts */
+  readonlyIndexes: Uint8Array;
 }
 
 /**
