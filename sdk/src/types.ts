@@ -31,13 +31,13 @@ export interface MultisigConfig {
 
 /**
  * VaultTransaction account data.
- * Matches the on-chain VaultTransaction struct.
+ * Matches the on-chain VaultTransaction struct (Anchor camelCase convention).
  */
 export interface VaultTransactionData {
   /** Multisig this transaction belongs to */
   multisig: PublicKey;
-  /** Transaction index */
-  index: bigint;
+  /** Transaction index (matches multisig.transaction_index counter at create time) */
+  transactionIndex: bigint;
   /** Member who created the proposal */
   creator: PublicKey;
   /** PDA bump */
@@ -49,7 +49,7 @@ export interface VaultTransactionData {
   /** Whether the transaction has been executed */
   executed: boolean;
   /** Members who have approved */
-  approvers: PublicKey[];
+  approvals: PublicKey[];
   /** The compact V0-style transaction message */
   message: TransactionMessage;
 }
@@ -65,7 +65,8 @@ export interface TransactionMessage {
   numWritableSigners: number;
   /** Number of writable non-signers */
   numWritableNonSigners: number;
-  /** Static account keys (multisig PDA must be at index 0) */
+  /** Static account keys. By convention, the VAULT PDA at `vault_index` must
+   *  be at index 0 (it's the canonical signer for inner instructions). */
   accountKeys: PublicKey[];
   /** Compiled instructions referencing accounts by index */
   instructions: CompiledInstruction[];

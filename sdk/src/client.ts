@@ -465,13 +465,13 @@ export class TrulySelfInitiatingMultisigClient {
       ).vaultTransaction.fetch(address);
       return {
         multisig: account.multisig as PublicKey,
-        index: account.transactionIndex as bigint,
+        transactionIndex: account.transactionIndex as bigint,
         creator: account.creator as PublicKey,
         bump: account.bump as number,
         vaultIndex: account.vaultIndex as number,
         vaultBump: account.vaultBump as number,
         executed: account.executed as boolean,
-        approvers: account.approvals as PublicKey[],
+        approvals: account.approvals as PublicKey[],
         message: account.message as TransactionMessage,
       };
     } catch (e) {
