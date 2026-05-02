@@ -9,8 +9,6 @@ export interface SignatureData {
   signer: PublicKey;
   /** Ed25519 signature (64 bytes) */
   signature: Uint8Array;
-  /** SHA-256 hash of the initialization message (32 bytes) */
-  messageHash: Uint8Array;
 }
 
 /**
@@ -23,8 +21,6 @@ export interface MultisigConfig {
   threshold: number;
   /** Current transaction index */
   transactionIndex: bigint;
-  /** Whether the multisig is initialized */
-  isInitialized: boolean;
   /** PDA bump seed */
   bump: number;
 }

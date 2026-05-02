@@ -5,6 +5,9 @@ import {
   Transaction,
   SystemProgram,
   TransactionInstruction,
+  TransactionMessage as Web3TransactionMessage,
+  VersionedTransaction,
+  AddressLookupTableProgram,
   sendAndConfirmTransaction,
   SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
@@ -23,10 +26,11 @@ import {
   deriveVaultAddress,
   createInitSignature,
   createInitializationMessage,
+  hashMembers,
   sortMembers,
   validateConfig,
   verifySignature,
-  createEd25519Instructions,
+  createBatchedEd25519Instruction,
   buildMessageFromInstructions,
 } from "./utils";
 
@@ -142,24 +146,104 @@ export class TrulySelfInitiatingMultisigClient {
   }
 
   /**
-   * Initialize the multisig with collected signatures
+   * Create an Address Lookup Table populated with the multisig's members
+   * AND the well-known accounts that the init ix references (`SystemProgram`,
+   * instructions sysvar). Including those system accounts in the ALT lets
+   * the V0 compiler route them through the lookup instead of bloating the
+   * static account list — recovers ~64 bytes that's needed to fit big
+   * multisigs (e.g. 7-of-10) under the 1232-byte tx cap.
    *
-   * This sends a transaction containing:
-   * 1. Ed25519 program instructions (one per signature) for on-chain verification
-   * 2. The initialize_multisig instruction
+   * Members are stored sorted so all callers produce identical ALT
+   * contents for the same member set. The ALT can be reused across many
+   * `initialize()` calls if you want sibling multisigs sharing membership.
    *
-   * The Ed25519 program verifies each signature, and our program reads these
-   * via the Instructions Sysvar to confirm verification.
+   * Waits 1 slot (Solana ALT warm-up) AND polls until the ALT account
+   * actually reports all addresses are committed before returning.
+   *
+   * Returns the ALT pubkey, ready to pass to {@link initialize}.
+   */
+  async createMembersAddressLookupTable(
+    members: PublicKey[],
+    payer: Keypair
+  ): Promise<PublicKey> {
+    if (members.length === 0) {
+      throw new Error("createMembersAddressLookupTable: members is empty");
+    }
+    const sortedMembers = sortMembers(members);
+    const altAddresses = [
+      ...sortedMembers,
+      SystemProgram.programId,
+      SYSVAR_INSTRUCTIONS_PUBKEY,
+    ];
+
+    const recentSlot = await this.connection.getSlot("finalized");
+    const [createIx, lookupTableAddress] =
+      AddressLookupTableProgram.createLookupTable({
+        authority: payer.publicKey,
+        payer: payer.publicKey,
+        recentSlot,
+      });
+    const extendIx = AddressLookupTableProgram.extendLookupTable({
+      payer: payer.publicKey,
+      authority: payer.publicKey,
+      lookupTable: lookupTableAddress,
+      addresses: altAddresses,
+    });
+
+    const tx = new Transaction().add(createIx, extendIx);
+    await sendAndConfirmTransaction(this.connection, tx, [payer], {
+      commitment: "confirmed",
+    });
+
+    // 1-slot warm-up + poll until the ALT account is fully indexed.
+    const startSlot = await this.connection.getSlot("processed");
+    while ((await this.connection.getSlot("processed")) <= startSlot + 1) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const acc = await this.connection.getAddressLookupTable(
+        lookupTableAddress
+      );
+      if (
+        acc.value &&
+        acc.value.state.addresses.length === altAddresses.length
+      ) {
+        return lookupTableAddress;
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(
+      `ALT ${lookupTableAddress.toBase58()} did not finalize ${
+        altAddresses.length
+      } addresses within 10s`
+    );
+  }
+
+  /**
+   * Initialize the multisig.
+   *
+   * The transaction contains:
+   *   ix[0] = batched Ed25519 native-program ix verifying every collected
+   *           signature over the shared 67-byte init message
+   *   ix[1] = our `initialize_multisig` ix; members are passed as
+   *           `remaining_accounts` resolved from the supplied ALT, the
+   *           pre-computed `member_hash` is the on-chain PDA seed
+   *
+   * Built as a V0 transaction so the ALT lookup is honored. Members in
+   * the ALT keep the on-chain payload to ~1 byte per member instead of 32,
+   * letting us fit up to 7 raw signatures in a single tx.
    */
   async initialize(
     members: PublicKey[],
     threshold: number,
     signatures: SignatureData[],
-    payer: Keypair
+    payer: Keypair,
+    membersAlt: PublicKey
   ): Promise<InitializeResult> {
     validateConfig(members, threshold);
 
-    // Client-side validation
     const validation = this.verifySignatures(members, threshold, signatures);
     if (!validation.valid) {
       throw new Error(
@@ -167,7 +251,6 @@ export class TrulySelfInitiatingMultisigClient {
       );
     }
 
-    // Derive multisig address
     const sortedMembers = sortMembers(members);
     const [multisigAddress, bump] = deriveMultisigAddress(
       sortedMembers,
@@ -175,49 +258,50 @@ export class TrulySelfInitiatingMultisigClient {
       this.programId
     );
 
-    // Create Ed25519 verification instructions (must come BEFORE initialize)
-    const ed25519Instructions = createEd25519Instructions(
-      members,
-      threshold,
-      signatures
-    );
+    // Pre-compute member_hash for the program — must match what's used as
+    // PDA seed bytes (first 8 bytes of sha256(sorted_members)).
+    const memberHash = hashMembers(sortedMembers);
 
-    // Convert signatures to the format expected by the program
-    const signaturesForProgram = signatures.map((sig) => ({
-      signer: sig.signer,
-      signature: Array.from(sig.signature),
-      messageHash: Array.from(sig.messageHash),
-    }));
+    const message = createInitializationMessage(members, threshold);
+    const ed25519Ix = createBatchedEd25519Instruction(signatures, message);
 
-    // Build the initialize instruction
     const initializeIx = await this.program.methods
-      .initializeMultisig(sortedMembers, threshold, signaturesForProgram)
+      .initializeMultisig(Array.from(memberHash), threshold)
       .accounts({
         multisig: multisigAddress,
         payer: payer.publicKey,
         instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         systemProgram: SystemProgram.programId,
       })
+      .remainingAccounts(
+        sortedMembers.map((pubkey) => ({
+          pubkey,
+          isSigner: false,
+          isWritable: false,
+        }))
+      )
       .instruction();
 
-    // Build transaction with Ed25519 instructions FIRST, then initialize
-    const transaction = new Transaction();
-
-    // Add Ed25519 verification instructions
-    for (const ix of ed25519Instructions) {
-      transaction.add(ix);
+    // Fetch the ALT account so the V0 compiler knows which addresses to
+    // de-duplicate from the static account list.
+    const altResp = await this.connection.getAddressLookupTable(membersAlt);
+    if (!altResp.value) {
+      throw new Error(
+        `ALT not found at ${membersAlt.toBase58()} — did you call createMembersAddressLookupTable() first?`
+      );
     }
 
-    // Add the initialize instruction
-    transaction.add(initializeIx);
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    const v0Message = new Web3TransactionMessage({
+      payerKey: payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [ed25519Ix, initializeIx],
+    }).compileToV0Message([altResp.value]);
 
-    // Send and confirm transaction
-    const txSignature = await sendAndConfirmTransaction(
-      this.connection,
-      transaction,
-      [payer],
-      { commitment: "confirmed" }
-    );
+    const tx = new VersionedTransaction(v0Message);
+    tx.sign([payer]);
+    const txSignature = await this.connection.sendTransaction(tx);
+    await this.connection.confirmTransaction(txSignature, "confirmed");
 
     return {
       signature: txSignature,
@@ -266,7 +350,6 @@ export class TrulySelfInitiatingMultisigClient {
         members: account.members as PublicKey[],
         threshold: account.threshold as number,
         transactionIndex: account.transactionIndex as bigint,
-        isInitialized: account.isInitialized as boolean,
         bump: account.bump as number,
       };
     } catch (e) {

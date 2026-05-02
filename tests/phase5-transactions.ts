@@ -6,12 +6,9 @@ import {
   PublicKey,
   SystemProgram,
   LAMPORTS_PER_SOL,
-  TransactionInstruction,
-  SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import { expect } from "chai";
-import * as crypto from "crypto";
-import * as nacl from "tweetnacl";
+import { setupMultisigViaAlt } from "./_helpers";
 
 /**
  * Phase 5: Transaction Proposal Lifecycle (V0-style messages).
@@ -27,9 +24,6 @@ describe("Phase 5: Transaction Lifecycle", () => {
   const program = anchor.workspace
     .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
   const programId = program.programId;
-  const ED25519_PROGRAM_ID = new PublicKey(
-    "Ed25519SigVerify111111111111111111111111111"
-  );
 
   // ============================================================
   // Helpers
@@ -45,72 +39,6 @@ describe("Phase 5: Transaction Lifecycle", () => {
     }
   }
 
-  function sortMembers(members: PublicKey[]): PublicKey[] {
-    return [...members].sort((a, b) =>
-      Buffer.compare(a.toBuffer(), b.toBuffer())
-    );
-  }
-
-  function buildInitMessage(members: PublicKey[], threshold: number): Buffer {
-    const sorted = sortMembers(members);
-    return Buffer.concat([
-      Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
-      ...sorted.map((m) => Buffer.from(m.toBytes())),
-      Buffer.from([threshold]),
-    ]);
-  }
-
-  function signInitMessage(
-    members: PublicKey[],
-    threshold: number,
-    signer: Keypair
-  ) {
-    const message = buildInitMessage(members, threshold);
-    const signature = nacl.sign.detached(message, signer.secretKey);
-    const messageHash = crypto.createHash("sha256").update(message).digest();
-    return {
-      signer: signer.publicKey,
-      signature: Array.from(signature),
-      messageHash: Array.from(messageHash),
-    };
-  }
-
-  // Build the Solana Ed25519 program "verify single signature" instruction.
-  // Layout matches the program's verify_ed25519_signature parser.
-  function makeEd25519VerifyIx(
-    pubkey: PublicKey,
-    message: Buffer,
-    signature: Buffer
-  ): TransactionInstruction {
-    const PUBKEY_OFFSET = 16;
-    const SIG_OFFSET = PUBKEY_OFFSET + 32;
-    const MSG_OFFSET = SIG_OFFSET + 64;
-    const data = Buffer.alloc(MSG_OFFSET + message.length);
-
-    // Header.
-    data.writeUInt8(1, 0); // num_signatures
-    data.writeUInt8(0, 1); // padding
-
-    // Signature entry (14 bytes).
-    data.writeUInt16LE(SIG_OFFSET, 2); // signature_offset
-    data.writeUInt16LE(0xffff, 4); // signature_instruction_index
-    data.writeUInt16LE(PUBKEY_OFFSET, 6); // public_key_offset
-    data.writeUInt16LE(0xffff, 8); // public_key_instruction_index
-    data.writeUInt16LE(MSG_OFFSET, 10); // message_data_offset
-    data.writeUInt16LE(message.length, 12); // message_data_size
-    data.writeUInt16LE(0xffff, 14); // message_instruction_index
-
-    pubkey.toBuffer().copy(data, PUBKEY_OFFSET);
-    signature.copy(data, SIG_OFFSET);
-    message.copy(data, MSG_OFFSET);
-
-    return new TransactionInstruction({
-      keys: [],
-      programId: ED25519_PROGRAM_ID,
-      data,
-    });
-  }
-
   const VAULT_PDA_SEED = Buffer.from("vault");
 
   function deriveVault(
@@ -124,9 +52,9 @@ describe("Phase 5: Transaction Lifecycle", () => {
   }
 
   /**
-   * Set up a fresh multisig: derive address, pre-fund the vault (vault_index=0),
-   * collect signatures, submit init tx with Ed25519 verify ixs preceding the
-   * program ix. Returns the multisig PDA + vault PDA + funding context.
+   * Set up a fresh multisig via the ALT-based init flow. Returns the
+   * multisig PDA + vault PDA along with the keypairs so tests can sign as
+   * members.
    */
   async function setupMultisig(opts: {
     memberCount: number;
@@ -146,12 +74,16 @@ describe("Phase 5: Transaction Lifecycle", () => {
     );
     for (const m of members) await fund(m.publicKey);
 
-    const memberKeys = members.map((m) => m.publicKey);
-    const sortedMemberKeys = sortMembers(memberKeys);
+    const sortedMemberKeys = [...members.map((m) => m.publicKey)].sort((a, b) =>
+      Buffer.compare(a.toBuffer(), b.toBuffer())
+    );
 
-    const multisig: PublicKey = (await program.methods
-      .deriveAddress(sortedMemberKeys, opts.threshold)
-      .view()) as PublicKey;
+    const { multisig } = await setupMultisigViaAlt({
+      program,
+      connection: provider.connection,
+      members,
+      threshold: opts.threshold,
+    });
 
     const [vault, vaultBump] = deriveVault(multisig, 0);
 
@@ -172,28 +104,6 @@ describe("Phase 5: Transaction Lifecycle", () => {
         funder,
       ]);
     }
-
-    // Collect threshold signatures.
-    const sigDatas = members
-      .slice(0, opts.threshold)
-      .map((m) => signInitMessage(memberKeys, opts.threshold, m));
-    const message = buildInitMessage(memberKeys, opts.threshold);
-    const ed25519Ixs = sigDatas.map((s) =>
-      makeEd25519VerifyIx(s.signer, message, Buffer.from(s.signature))
-    );
-
-    const payer = members[0];
-    await program.methods
-      .initializeMultisig(sortedMemberKeys, opts.threshold, sigDatas)
-      .accountsPartial({
-        multisig,
-        payer: payer.publicKey,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
-        systemProgram: SystemProgram.programId,
-      })
-      .preInstructions(ed25519Ixs)
-      .signers([payer])
-      .rpc();
 
     return {
       members,
@@ -301,6 +211,19 @@ describe("Phase 5: Transaction Lifecycle", () => {
       expect(tx.executed).to.equal(false);
       expect(tx.approvals.length).to.equal(0);
       expect(tx.message.accountKeys.length).to.equal(3);
+      // Verify the actual stored pubkeys, not just count.
+      expect((tx.message.accountKeys[0] as PublicKey).toBase58()).to.equal(
+        vault.toBase58()
+      );
+      expect((tx.message.accountKeys[1] as PublicKey).toBase58()).to.equal(
+        recipient.publicKey.toBase58()
+      );
+      expect((tx.message.accountKeys[2] as PublicKey).toBase58()).to.equal(
+        SystemProgram.programId.toBase58()
+      );
+      expect(tx.vaultIndex).to.equal(0);
+      expect(tx.message.numSigners).to.equal(1);
+      expect(tx.message.numWritableSigners).to.equal(1);
     });
 
     it("rejects a non-member creator", async () => {
@@ -495,7 +418,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
         .rpc();
 
       // Second proposal — must be at index N+2 (counter incremented at create).
-      const m2 = buildSolTransferMessage(multisig, r2.publicKey, 2000);
+      const m2 = buildSolTransferMessage(vault, r2.publicKey, 2000);
       const t2 = await nextTransactionPda(multisig);
       expect(t2.index.toString()).to.equal(
         (t1.index + BigInt(1)).toString(),
@@ -839,6 +762,14 @@ describe("Phase 5: Transaction Lifecycle", () => {
         .remainingAccounts(remaining)
         .signers([members[0]])
         .rpc();
+
+      // The executed flag must be persisted on-chain BEFORE the second attempt.
+      // (Without this assertion, a buggy program could fail the AlreadyExecuted
+      // check for some other reason and the test would still pass.)
+      const txAfter = await (program.account as any).vaultTransaction.fetch(
+        pda
+      );
+      expect(txAfter.executed).to.equal(true);
 
       let threw = false;
       try {

@@ -73,8 +73,16 @@ export function hashMembers(members: PublicKey[]): Buffer {
 }
 
 /**
- * Derive the multisig PDA address
- * Must match the Rust derive_multisig_pda function
+ * Derive the multisig PDA address.
+ * Must byte-for-byte match the Rust `derive_multisig_pda` function.
+ *
+ * Uses the FULL 32-byte sha256 of sorted members as a seed. Truncating
+ * (e.g. to 8 bytes) would let an attacker find a colliding member set
+ * with ~2^64 preimage work and steal pre-funded vault balances by
+ * initializing the multisig at the colliding PDA before the legitimate
+ * users do — vault PDAs are derived from the multisig PDA address (not
+ * its contents), so squatting the multisig address means controlling
+ * every vault under it.
  */
 export function deriveMultisigAddress(
   members: PublicKey[],
@@ -84,11 +92,8 @@ export function deriveMultisigAddress(
   const sortedMembers = sortMembers(members);
   const memberHash = hashMembers(sortedMembers);
 
-  // Use first 8 bytes of hash as seed (matches Rust implementation)
-  const hashSeed = memberHash.slice(0, 8);
-
   const [pda, bump] = PublicKey.findProgramAddressSync(
-    [Buffer.from("multisig"), hashSeed, Buffer.from([threshold])],
+    [Buffer.from("multisig"), memberHash, Buffer.from([threshold])],
     programId
   );
 
@@ -96,27 +101,26 @@ export function deriveMultisigAddress(
 }
 
 /**
- * Create the initialization message that members must sign
- * Must match the Rust create_initialization_message function
+ * Create the fixed-size init message that members sign off-chain.
+ *
+ * Layout (67 bytes total, regardless of member count):
+ *   [0..34]   domain separator (`INIT_MESSAGE_PREFIX`)
+ *   [34..66]  sha256(sorted_members concatenated raw bytes)
+ *   [66]      threshold
+ *
+ * Must byte-for-byte match the Rust `create_initialization_message`.
  */
 export function createInitializationMessage(
   members: PublicKey[],
   threshold: number
 ): Buffer {
   const sortedMembers = sortMembers(members);
-
-  // Start with domain separator
-  const parts: Buffer[] = [Buffer.from(INIT_MESSAGE_PREFIX)];
-
-  // Add each member's public key
-  for (const member of sortedMembers) {
-    parts.push(Buffer.from(member.toBytes()));
-  }
-
-  // Add threshold
-  parts.push(Buffer.from([threshold]));
-
-  return Buffer.concat(parts);
+  const memberHash = hashMembers(sortedMembers); // 32-byte sha256
+  return Buffer.concat([
+    Buffer.from(INIT_MESSAGE_PREFIX),
+    memberHash,
+    Buffer.from([threshold]),
+  ]);
 }
 
 /**
@@ -128,19 +132,12 @@ export function createInitSignature(
   threshold: number,
   memberKeypair: Keypair
 ): SignatureData {
-  // Create the message
   const message = createInitializationMessage(members, threshold);
-
-  // Sign with member's private key
   const signature = nacl.sign.detached(message, memberKeypair.secretKey);
-
-  // Hash the message
-  const messageHash = createHash("sha256").update(message).digest();
 
   return {
     signer: memberKeypair.publicKey,
     signature: Buffer.from(signature),
-    messageHash: Buffer.from(messageHash),
   };
 }
 
@@ -153,14 +150,6 @@ export function verifySignature(
   threshold: number
 ): boolean {
   const message = createInitializationMessage(members, threshold);
-  const messageHash = createHash("sha256").update(message).digest();
-
-  // Verify message hash matches
-  if (!messageHash.equals(Buffer.from(sigData.messageHash))) {
-    return false;
-  }
-
-  // Verify signature
   return nacl.sign.detached.verify(
     message,
     sigData.signature,
@@ -194,12 +183,12 @@ export function validateConfig(members: PublicKey[], threshold: number): void {
 }
 
 /**
- * Create an Ed25519 program instruction for signature verification
- * This instruction must be included BEFORE the initialize_multisig instruction
- * in the same transaction.
+ * Create an Ed25519 program instruction that verifies a SINGLE signature.
  *
- * The Ed25519 program verifies the signature, and our program reads the
- * instruction data via the Instructions Sysvar to confirm verification.
+ * Kept as a primitive for tests and for callers who want one-sig-per-ix
+ * semantics. The init flow uses {@link createBatchedEd25519Instruction}
+ * instead — a single ix verifying every signer's signature, which keeps
+ * the init transaction under Solana's 1232-byte cap for big multisigs.
  */
 export function createEd25519Instruction(
   pubkey: PublicKey,
@@ -288,19 +277,81 @@ export function createEd25519Instruction(
 }
 
 /**
- * Create Ed25519 verification instructions for all signatures
- * These must be prepended to the transaction before the initialize instruction
+ * Build a SINGLE Ed25519 native-program instruction that verifies all
+ * collected signatures over the shared init message.
+ *
+ * The Ed25519 ix layout supports `num_signatures > 1` with a per-entry
+ * 14-byte header pointing at sig/pubkey/message offsets within the same
+ * instruction's data buffer. We pack:
+ *   [header (2 + 14*N bytes)]
+ *   [signatures (64 * N bytes)]
+ *   [pubkeys (32 * N bytes)]
+ *   [shared message (M bytes)]
+ *
+ * Sharing the message bytes (instead of repeating them per signature) is
+ * what brings 5+-signer init transactions under Solana's 1232-byte cap.
+ *
+ * MUST be prepended at instruction index 0 in the init transaction — the
+ * on-chain program reads it from the Instructions Sysvar at that index.
  */
-export function createEd25519Instructions(
-  members: PublicKey[],
-  threshold: number,
-  signatures: SignatureData[]
-): TransactionInstruction[] {
-  const message = createInitializationMessage(members, threshold);
+export function createBatchedEd25519Instruction(
+  signatures: SignatureData[],
+  message: Buffer
+): TransactionInstruction {
+  if (signatures.length === 0) {
+    throw new Error("createBatchedEd25519Instruction: signatures is empty");
+  }
+  // num_signatures is encoded as a u8 in the Ed25519 ix header. Anything
+  // larger would silently overflow when written, producing a malformed ix.
+  if (signatures.length > 255) {
+    throw new Error(
+      `createBatchedEd25519Instruction: too many signatures (${signatures.length}), max is 255`
+    );
+  }
+  for (let i = 0; i < signatures.length; i++) {
+    if (signatures[i].signature.length !== 64) {
+      throw new Error(
+        `createBatchedEd25519Instruction: signature[${i}] must be 64 bytes, got ${signatures[i].signature.length}`
+      );
+    }
+  }
 
-  return signatures.map((sig) =>
-    createEd25519Instruction(sig.signer, message, Buffer.from(sig.signature))
-  );
+  const n = signatures.length;
+  const headerSize = 2 + 14 * n;
+  const sigsStart = headerSize;
+  const pubkeysStart = sigsStart + n * 64;
+  const messageStart = pubkeysStart + n * 32;
+  const totalSize = messageStart + message.length;
+
+  const data = Buffer.alloc(totalSize);
+
+  data.writeUInt8(n, 0);
+  data.writeUInt8(0, 1); // padding
+
+  for (let i = 0; i < n; i++) {
+    const entry = 2 + i * 14;
+    const sigOffset = sigsStart + i * 64;
+    const pubkeyOffset = pubkeysStart + i * 32;
+
+    data.writeUInt16LE(sigOffset, entry);
+    data.writeUInt16LE(0xffff, entry + 2); // sig_instruction_index
+    data.writeUInt16LE(pubkeyOffset, entry + 4);
+    data.writeUInt16LE(0xffff, entry + 6); // pubkey_instruction_index
+    data.writeUInt16LE(messageStart, entry + 8);
+    data.writeUInt16LE(message.length, entry + 10);
+    data.writeUInt16LE(0xffff, entry + 12); // message_instruction_index
+
+    Buffer.from(signatures[i].signature).copy(data, sigOffset);
+    Buffer.from(signatures[i].signer.toBytes()).copy(data, pubkeyOffset);
+  }
+
+  message.copy(data, messageStart);
+
+  return new TransactionInstruction({
+    keys: [],
+    programId: ED25519_PROGRAM_ID,
+    data,
+  });
 }
 
 /**

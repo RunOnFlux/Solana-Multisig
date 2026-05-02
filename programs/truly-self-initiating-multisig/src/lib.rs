@@ -7,6 +7,19 @@ use anchor_lang::solana_program::sysvar::instructions::{self, load_instruction_a
 
 declare_id!("F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo");
 
+/// Like `require!`, but logs a specific reason via `msg!` before returning.
+/// Used for generic error codes (e.g., `InvalidMessage`) that cover many
+/// failure modes — gives users an actionable debug message in tx logs without
+/// growing the IDL with 15 separate error variants.
+macro_rules! require_msg {
+    ($cond:expr, $error:expr, $msg:literal) => {
+        if !($cond) {
+            msg!($msg);
+            return Err(error!($error));
+        }
+    };
+}
+
 #[program]
 pub mod truly_self_initiating_multisig {
     use super::*;
@@ -36,35 +49,49 @@ pub mod truly_self_initiating_multisig {
         Ok(vault_pda)
     }
 
-    /// Initialize a truly self-initiating multisig
+    /// Initialize a truly self-initiating multisig.
     ///
-    /// SECURITY: This function verifies Ed25519 signatures using Solana's native
-    /// Ed25519 program. The signatures must be submitted as a preceding instruction
-    /// in the same transaction, which is verified via the Instructions Sysvar.
+    /// Members are passed via `remaining_accounts` (typically resolved from
+    /// an Address Lookup Table the client set up beforehand) so they cost
+    /// only ~1 byte each in the transaction instead of 32. This is what
+    /// lets us fit "any 7-of-N" multisigs (single-sig mode) into Solana's
+    /// 1232-byte transaction cap.
     ///
-    /// NO DETERMINISTIC PRIVATE KEYS - only member signatures verified on-chain.
-    pub fn initialize_multisig(
-        ctx: Context<InitializeMultisig>,
-        members: Vec<Pubkey>,
+    /// `member_hash` is `sha256(sorted_members)` computed off-chain by the
+    /// client and used to derive the multisig PDA. The function recomputes
+    /// the hash from the actual `remaining_accounts` and rejects if it
+    /// disagrees — this binds the PDA address to the on-chain stored
+    /// member set.
+    ///
+    /// SECURITY: each member signs a fixed-size init message off-chain
+    /// (`prefix || sha256(sorted_members) || threshold` — 67 bytes
+    /// regardless of N). The SDK packs all signatures into a single
+    /// Ed25519 native-program instruction at index 0 of the same tx; we
+    /// read it via the Instructions Sysvar, confirm it verified OUR init
+    /// message, and harvest the list of signers.
+    ///
+    /// NO DETERMINISTIC PRIVATE KEYS — only member signatures verified
+    /// on-chain via the native Ed25519 program.
+    pub fn initialize_multisig<'info>(
+        ctx: Context<'_, '_, '_, 'info, InitializeMultisig<'info>>,
+        member_hash: [u8; 32],
         threshold: u8,
-        signatures: Vec<SignatureData>,
     ) -> Result<()> {
-        // Validate configuration
+        // Harvest members from remaining_accounts. The client typically
+        // sources these from an ALT, but the program doesn't care — they
+        // can also be passed as static accounts.
+        let members: Vec<Pubkey> = ctx.remaining_accounts.iter().map(|a| a.key()).collect();
+
         require!(
             threshold > 0 && threshold <= members.len() as u8,
             ErrorCode::InvalidThreshold
         );
-
         require!(members.len() <= MAX_MEMBERS, ErrorCode::TooManyMembers);
 
-        // Sort members for deterministic PDA derivation
+        // Sort for deterministic PDA derivation. Dedup check uses adjacency
+        // after sorting.
         let mut sorted_members = members.clone();
         sorted_members.sort();
-
-        // Check for duplicates. saturating_sub guards against an empty members
-        // list — that case is already rejected by the threshold check above
-        // (threshold > 0 && threshold <= 0 is false), but defensive against
-        // future refactors of the threshold check.
         for i in 0..sorted_members.len().saturating_sub(1) {
             require!(
                 sorted_members[i] != sorted_members[i + 1],
@@ -72,82 +99,48 @@ pub mod truly_self_initiating_multisig {
             );
         }
 
-        // Validate we have enough signatures
+        // Bind member_hash → sorted_members. Without this, a caller could
+        // supply different remaining_accounts than the hash claims, and the
+        // multisig would end up at a PDA that doesn't reflect its members.
+        let actual_hash = hash_members(&sorted_members);
+        require!(actual_hash == member_hash, ErrorCode::InvalidPDA);
+
+        // Anchor's init constraint already validated the multisig account
+        // is at the PDA derived from member_hash + threshold; combined with
+        // actual_hash == member_hash, the PDA is bound to the members.
+
+        // Verify Ed25519 signatures (program-side check that the Ed25519
+        // ix verified OUR init message and return the signer list).
+        let init_message = create_initialization_message(&sorted_members, threshold);
+        let signers = verify_ed25519_batch(&ctx.accounts.instructions_sysvar, 0, &init_message)?;
+
         require!(
-            signatures.len() >= threshold as usize,
+            signers.len() >= threshold as usize,
             ErrorCode::InsufficientSignatures
         );
-
-        // Verify PDA derivation matches
-        let (expected_pda, bump) = derive_multisig_pda(&sorted_members, threshold)?;
-        require_keys_eq!(
-            ctx.accounts.multisig.key(),
-            expected_pda,
-            ErrorCode::InvalidPDA
-        );
-
-        // Create initialization message for signature verification
-        let init_message = create_initialization_message(&sorted_members, threshold);
-        let message_hash = hash(&init_message).to_bytes();
-
-        // ====================================================
-        // CRITICAL: Verify Ed25519 signatures using Solana's
-        // native Ed25519 program via Instructions Sysvar
-        // ====================================================
-
-        let ix_sysvar = &ctx.accounts.instructions_sysvar;
-
-        // Verify each signature
-        let mut verified_members = Vec::new();
-
-        for (sig_index, sig_data) in signatures.iter().enumerate() {
-            // Verify signer is a member
+        for (i, signer) in signers.iter().enumerate() {
             require!(
-                sorted_members.contains(&sig_data.signer),
+                sorted_members.contains(signer),
                 ErrorCode::UnauthorizedSigner
             );
-
-            // Check for duplicate signatures
-            require!(
-                !verified_members.contains(&sig_data.signer),
-                ErrorCode::DuplicateSignature
-            );
-
-            // Verify message hash matches
-            require!(
-                sig_data.message_hash == message_hash,
-                ErrorCode::InvalidMessageHash
-            );
-
-            // Verify the Ed25519 signature via Instructions Sysvar
-            // The client must have included an Ed25519 program instruction
-            // at position `sig_index` in the transaction
-            verify_ed25519_signature(
-                ix_sysvar,
-                sig_index,
-                &sig_data.signer.to_bytes(),
-                &init_message,
-                &sig_data.signature,
-            )?;
-
-            msg!("✅ Verified signature from member: {}", sig_data.signer);
-
-            // Store the verified member
-            verified_members.push(sig_data.signer);
+            for prior in &signers[..i] {
+                require!(prior != signer, ErrorCode::DuplicateSignature);
+            }
         }
 
-        // Initialize the multisig account
+        // Initialize the multisig account.
+        let bump = ctx.bumps.multisig;
         let multisig = &mut ctx.accounts.multisig;
         multisig.members = sorted_members;
         multisig.threshold = threshold;
         multisig.transaction_index = 0;
-        multisig.is_initialized = true;
         multisig.bump = bump;
 
         msg!(
-            "✅ Multisig initialized with {} members, threshold: {}",
+            "✅ Multisig initialized: {} members, threshold {}, {} signatures verified",
             members.len(),
-            threshold
+            threshold,
+            signers.len()
         );
         msg!("✅ Multisig PDA: {}", ctx.accounts.multisig.key());
 
@@ -183,46 +176,64 @@ pub mod truly_self_initiating_multisig {
         let (expected_vault_pda, vault_bump) = derive_vault_pda(&multisig_key, vault_index);
 
         // Validate message structure.
-        require!(!message.account_keys.is_empty(), ErrorCode::InvalidMessage);
-        require!(
-            message.account_keys.len() <= MAX_TX_ACCOUNT_KEYS,
-            ErrorCode::InvalidMessage
+        require_msg!(
+            !message.account_keys.is_empty(),
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: account_keys must not be empty"
         );
-        require!(!message.instructions.is_empty(), ErrorCode::InvalidMessage);
-        require!(
+        require_msg!(
+            message.account_keys.len() <= MAX_TX_ACCOUNT_KEYS,
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: account_keys exceeds MAX_TX_ACCOUNT_KEYS"
+        );
+        require_msg!(
+            !message.instructions.is_empty(),
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: instructions must not be empty"
+        );
+        require_msg!(
             message.instructions.len() <= MAX_TX_INSTRUCTIONS,
-            ErrorCode::InvalidMessage
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: instructions exceeds MAX_TX_INSTRUCTIONS"
         );
         // Signer counts must be consistent.
-        require!(
+        require_msg!(
             (message.num_signers as usize) <= message.account_keys.len(),
-            ErrorCode::InvalidMessage
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: num_signers > account_keys.len"
         );
-        require!(
+        require_msg!(
             message.num_writable_signers <= message.num_signers,
-            ErrorCode::InvalidMessage
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: num_writable_signers > num_signers"
         );
         let non_signer_count = message.account_keys.len() - message.num_signers as usize;
-        require!(
+        require_msg!(
             (message.num_writable_non_signers as usize) <= non_signer_count,
-            ErrorCode::InvalidMessage
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: num_writable_non_signers > non-signer slots"
         );
         // The vault PDA must be the first signer (index 0). Any instruction
         // that moves vault funds references index 0; we sign for it via PDA
         // using the vault's seeds at execute time.
-        require!(message.num_signers >= 1, ErrorCode::InvalidMessage);
-        require_keys_eq!(
-            message.account_keys[0],
-            expected_vault_pda,
-            ErrorCode::InvalidMessage
+        require_msg!(
+            message.num_signers >= 1,
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: num_signers must be >= 1 (vault must sign)"
+        );
+        require_msg!(
+            message.account_keys[0] == expected_vault_pda,
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: account_keys[0] must equal the vault PDA at vault_index"
         );
 
         // Detect duplicate account_keys (wasteful and likely a client bug).
         for i in 0..message.account_keys.len() {
             for j in (i + 1)..message.account_keys.len() {
-                require!(
+                require_msg!(
                     message.account_keys[i] != message.account_keys[j],
-                    ErrorCode::InvalidMessage
+                    ErrorCode::InvalidMessage,
+                    "InvalidMessage: duplicate entry in account_keys"
                 );
             }
         }
@@ -230,59 +241,67 @@ pub mod truly_self_initiating_multisig {
         // Per-instruction Vec bounds (so we fail with a clean error before
         // the borsh write would fail when the account was over-allocated).
         for ix in &message.instructions {
-            require!(
+            require_msg!(
                 ix.account_indexes.len() <= MAX_INSTRUCTION_ACCOUNTS,
-                ErrorCode::InvalidMessage
+                ErrorCode::InvalidMessage,
+                "InvalidMessage: instruction account_indexes exceeds MAX_INSTRUCTION_ACCOUNTS"
             );
-            require!(
+            require_msg!(
                 ix.data.len() <= MAX_INSTRUCTION_DATA_LEN,
-                ErrorCode::InvalidMessage
+                ErrorCode::InvalidMessage,
+                "InvalidMessage: instruction data exceeds MAX_INSTRUCTION_DATA_LEN"
             );
         }
 
-        // Per-ALT-lookup Vec bounds.
-        require!(
-            message.address_table_lookups.len() <= MAX_ADDRESS_TABLE_LOOKUPS,
-            ErrorCode::InvalidMessage
+        // ALT references INSIDE a proposal are not allowed.
+        //
+        // The proposer can include up to MAX_TX_ACCOUNT_KEYS pubkeys directly in
+        // `account_keys` (resolved at create time). At execute time, the
+        // executor is free to use ALTs in the *outer* V0 transaction to fit
+        // those static pubkeys compactly — our equality check
+        // (`remaining[i].key() == account_keys[i]`) catches any substitution
+        // regardless of whether they came from the V0 outer's static section
+        // or its ALT lookups.
+        //
+        // Allowing ALT references inside the proposal would mean trusting the
+        // executor's choice of ALT at execute time: a malicious executor could
+        // swap in a different ALT (with attacker-controlled addresses at the
+        // same indexes), redirecting CPI destinations. The proposal storage
+        // doesn't have a tx-size cap (it's an account, ~10KB), so there's no
+        // reason for proposers to push accounts into ALT references.
+        require_msg!(
+            message.address_table_lookups.is_empty(),
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: address_table_lookups must be empty (use static account_keys instead)"
         );
-        for lookup in &message.address_table_lookups {
-            require!(
-                lookup.writable_indexes.len() <= MAX_INDEXES_PER_LOOKUP,
-                ErrorCode::InvalidMessage
-            );
-            require!(
-                lookup.readonly_indexes.len() <= MAX_INDEXES_PER_LOOKUP,
-                ErrorCode::InvalidMessage
-            );
-        }
 
-        // Validate that all instruction indexes are within the combined account list.
-        let total_alt_writable: usize = message
-            .address_table_lookups
-            .iter()
-            .map(|l| l.writable_indexes.len())
-            .sum();
-        let total_alt_readonly: usize = message
-            .address_table_lookups
-            .iter()
-            .map(|l| l.readonly_indexes.len())
-            .sum();
-        let combined_count = message.account_keys.len() + total_alt_writable + total_alt_readonly;
+        // Validate that all instruction indexes are within the static account list.
+        let combined_count = message.account_keys.len();
         // Solana's runtime caps total accounts per tx at 256 (u8 index space).
-        require!(
+        require_msg!(
             combined_count <= MAX_COMBINED_ACCOUNTS,
-            ErrorCode::InvalidMessage
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: account count > 256 (Solana u8 index cap)"
         );
         for ix in &message.instructions {
-            // Program cannot be the multisig PDA (index 0) — it's a data account,
-            // not a program. Defensive; runtime would reject otherwise.
-            require!(ix.program_id_index >= 1, ErrorCode::InvalidMessage);
-            require!(
+            // Program cannot be the vault PDA (index 0) — it's not a program.
+            // Defensive; runtime would reject otherwise.
+            require_msg!(
+                ix.program_id_index >= 1,
+                ErrorCode::InvalidMessage,
+                "InvalidMessage: program_id_index points to vault (index 0)"
+            );
+            require_msg!(
                 (ix.program_id_index as usize) < combined_count,
-                ErrorCode::InvalidMessage
+                ErrorCode::InvalidMessage,
+                "InvalidMessage: program_id_index out of bounds"
             );
             for idx in &ix.account_indexes {
-                require!((*idx as usize) < combined_count, ErrorCode::InvalidMessage);
+                require_msg!(
+                    (*idx as usize) < combined_count,
+                    ErrorCode::InvalidMessage,
+                    "InvalidMessage: account index out of bounds"
+                );
             }
         }
 
@@ -425,43 +444,33 @@ pub mod truly_self_initiating_multisig {
         let transaction = &ctx.accounts.transaction;
 
         // ============================================================
-        // Build the resolved account list:
-        //   [ static_keys ] + [ ALT writable loaded ] + [ ALT readonly loaded ]
+        // Build the resolved account list. Proposals only carry static
+        // account_keys (ALT references inside proposals are rejected at
+        // create time — see address_table_lookups.is_empty() check).
         // ============================================================
         let message = &transaction.message;
         let static_count = message.account_keys.len();
-        let alt_writable_total: usize = message
-            .address_table_lookups
-            .iter()
-            .map(|l| l.writable_indexes.len())
-            .sum();
-        let alt_readonly_total: usize = message
-            .address_table_lookups
-            .iter()
-            .map(|l| l.readonly_indexes.len())
-            .sum();
-        let combined_count = static_count + alt_writable_total + alt_readonly_total;
 
-        // Defensive: enforce Solana's u8 index cap at execute time too.
+        // Defensive: enforce Solana's u8 index cap.
         require!(
-            combined_count <= MAX_COMBINED_ACCOUNTS,
+            static_count <= MAX_COMBINED_ACCOUNTS,
             ErrorCode::InvalidMessage
         );
 
-        // remaining_accounts must contain at least all the resolved accounts.
-        // The client may also append extra accounts (e.g. program_ids if not
-        // already in the combined list). We require at least combined_count.
+        // remaining_accounts must include all the static accounts at the same
+        // positions. The executor's V0 outer tx may source these from its own
+        // ALT (for tx-size compactness); the equality check below catches any
+        // substitution regardless of where each address came from.
         let remaining = ctx.remaining_accounts;
         require!(
-            remaining.len() >= combined_count,
+            remaining.len() >= static_count,
             ErrorCode::InsufficientRemainingAccounts
         );
 
-        // Build the resolved Pubkey list for the combined account space.
-        // Static keys come from the stored message; ALT-loaded keys come from
-        // the corresponding remaining_accounts (positional, runtime-validated).
-        let mut combined_pubkeys: Vec<Pubkey> = Vec::with_capacity(combined_count);
-        // Static section: must match remaining[i] exactly.
+        // Static section: every account_keys[i] must match remaining[i].
+        // This is the load-bearing security check — it binds every CPI
+        // destination to the pubkey the proposer signed off on.
+        let mut combined_pubkeys: Vec<Pubkey> = Vec::with_capacity(static_count);
         for (i, expected_key) in message.account_keys.iter().enumerate() {
             require_keys_eq!(
                 remaining[i].key(),
@@ -469,11 +478,6 @@ pub mod truly_self_initiating_multisig {
                 ErrorCode::AccountMismatch
             );
             combined_pubkeys.push(*expected_key);
-        }
-        // ALT-loaded section: trust the client. The runtime already validated
-        // the V0 outer tx's ALT contents against each ALT account.
-        for acc in &remaining[static_count..combined_count] {
-            combined_pubkeys.push(acc.key());
         }
 
         // ============================================================
@@ -497,7 +501,6 @@ pub mod truly_self_initiating_multisig {
         let num_writable_signers = message.num_writable_signers as usize;
         let num_writable_non_signers = message.num_writable_non_signers as usize;
         let static_writable_end = num_signers + num_writable_non_signers;
-        let alt_writable_end = static_count + alt_writable_total;
         let multisig_info = ctx.accounts.multisig.to_account_info();
 
         // ============================================================
@@ -511,7 +514,11 @@ pub mod truly_self_initiating_multisig {
             );
 
             let program_id_index = compiled.program_id_index as usize;
-            require!(program_id_index < combined_count, ErrorCode::InvalidMessage);
+            require_msg!(
+                program_id_index < static_count,
+                ErrorCode::InvalidMessage,
+                "InvalidMessage: program_id_index out of bounds at execute"
+            );
             let program_id = combined_pubkeys[program_id_index];
 
             // Build AccountMetas + AccountInfos for the CPI.
@@ -522,24 +529,21 @@ pub mod truly_self_initiating_multisig {
 
             for &raw_index in &compiled.account_indexes {
                 let i = raw_index as usize;
-                require!(i < combined_count, ErrorCode::InvalidMessage);
+                require!(i < static_count, ErrorCode::InvalidMessage);
                 let pubkey = combined_pubkeys[i];
 
-                // is_signer: any of the first num_signers static accounts.
+                // is_signer: any of the first num_signers slots are signers.
                 let is_signer = i < num_signers;
-                // is_writable: depends on which section the index falls in.
+                // is_writable: writable signers come first, then writable
+                // non-signers; everything else is readonly.
                 let is_writable = if i < num_writable_signers {
                     true // writable signer
                 } else if i < num_signers {
                     false // readonly signer
                 } else if i < static_writable_end {
-                    true // writable non-signer (static)
-                } else if i < static_count {
-                    false // readonly non-signer (static)
-                } else if i < alt_writable_end {
-                    true // ALT-loaded writable
+                    true // writable non-signer
                 } else {
-                    false // ALT-loaded readonly
+                    false // readonly non-signer
                 };
 
                 account_metas.push(if is_writable {
@@ -559,15 +563,13 @@ pub mod truly_self_initiating_multisig {
                 account_infos.push(info);
             }
 
-            // Append the program account for the CPI. Find it in remaining
-            // accounts (positional in combined list, or anywhere after if the
-            // client appended extras).
+            // Append the program account for the CPI. The program is at
+            // `program_id_index` in the static list, positional in
+            // remaining_accounts (gated by the bounds checks above).
             let program_info = if program_id == multisig_key {
                 multisig_info.clone()
-            } else if program_id_index < remaining.len() {
-                remaining[program_id_index].clone()
             } else {
-                return err!(ErrorCode::InvalidMessage);
+                remaining[program_id_index].clone()
             };
             account_infos.push(program_info);
 
@@ -602,101 +604,102 @@ pub mod truly_self_initiating_multisig {
 // Ed25519 Signature Verification Helper
 // ============================================================================
 
-/// Verify an Ed25519 signature using Solana's native Ed25519 program
-/// via the Instructions Sysvar.
+/// Read the Ed25519 native-program instruction at `ix_index` and confirm it
+/// verified one or more signatures over `expected_message`. Returns the list
+/// of signer pubkeys harvested from the ix's pubkey entries.
 ///
-/// The client must include an Ed25519 program verify instruction
-/// BEFORE the initialize_multisig instruction in the same transaction.
-fn verify_ed25519_signature(
+/// The native Ed25519 program already performed the cryptographic check
+/// before our program ran. Our job is to:
+///  - confirm the ix is an Ed25519 program ix,
+///  - confirm each entry's `*_instruction_index` is 0xFFFF (i.e. the bytes
+///    the Ed25519 program verified are in THIS ix, not some unrelated one),
+///  - confirm the message bytes the Ed25519 program verified are exactly
+///    the `expected_message` we want signed (defends against signature
+///    replay across different multisig configurations),
+///  - return the signers so the caller can match them against the member
+///    set and threshold.
+///
+/// The 0xFFFF check is critical: without it, an attacker could craft an
+/// Ed25519 ix whose offsets point into a *different* instruction's data
+/// (e.g. a previous successful init), causing the Ed25519 program to verify
+/// a sig over the OLD message while our byte check pretends it verified
+/// our NEW init message.
+fn verify_ed25519_batch(
     ix_sysvar: &AccountInfo,
-    expected_ix_index: usize,
-    pubkey: &[u8; 32],
-    message: &[u8],
-    signature: &[u8; 64],
-) -> Result<()> {
-    // Load the instruction at the expected index
-    let ix = load_instruction_at_checked(expected_ix_index, ix_sysvar)
+    ix_index: usize,
+    expected_message: &[u8],
+) -> Result<Vec<Pubkey>> {
+    let ix = load_instruction_at_checked(ix_index, ix_sysvar)
         .map_err(|_| ErrorCode::InvalidSignature)?;
-
-    // Verify it's an Ed25519 program instruction
     require!(
         ix.program_id == ed25519_program::ID,
         ErrorCode::InvalidSignature
     );
 
-    // The Ed25519 instruction data format:
-    // - 1 byte: number of signatures
-    // - 1 byte: padding
-    // For each signature:
-    // - 2 bytes: signature offset
-    // - 2 bytes: signature instruction index (0xFFFF = same instruction)
-    // - 2 bytes: public key offset
-    // - 2 bytes: public key instruction index
-    // - 2 bytes: message data offset
-    // - 2 bytes: message data size
-    // - 2 bytes: message instruction index
-    // Then the actual data: signature (64 bytes), pubkey (32 bytes), message
+    // Layout (little-endian where multi-byte):
+    //   [0]    num_signatures (u8)
+    //   [1]    padding (u8)
+    //   For each sig (14 bytes starting at offset 2 + i*14):
+    //     [+0]  signature_offset (u16)
+    //     [+2]  signature_instruction_index (u16, 0xFFFF == current ix)
+    //     [+4]  public_key_offset (u16)
+    //     [+6]  public_key_instruction_index (u16)
+    //     [+8]  message_data_offset (u16)
+    //     [+10] message_data_size (u16)
+    //     [+12] message_instruction_index (u16)
+    //   Then the raw bytes: signatures (64 each) + pubkeys (32 each) + messages.
+    let data = &ix.data;
+    require!(data.len() >= 2, ErrorCode::InvalidSignature);
 
-    let ix_data = &ix.data;
+    let num = data[0] as usize;
+    require!(num >= 1, ErrorCode::InvalidSignature);
 
-    // Must have at least 2 bytes for header
-    require!(ix_data.len() >= 2, ErrorCode::InvalidSignature);
+    let header_size = 2 + 14 * num;
+    require!(data.len() >= header_size, ErrorCode::InvalidSignature);
 
-    let num_signatures = ix_data[0];
-    require!(num_signatures >= 1, ErrorCode::InvalidSignature);
+    let mut signers: Vec<Pubkey> = Vec::with_capacity(num);
 
-    // Parse the first signature entry (we only need one per ix)
-    // Header is 2 bytes, each signature entry is 14 bytes
-    require!(ix_data.len() >= 2 + 14, ErrorCode::InvalidSignature);
+    for i in 0..num {
+        let entry = 2 + i * 14;
 
-    let sig_offset = u16::from_le_bytes([ix_data[2], ix_data[3]]) as usize;
-    let sig_ix_index = u16::from_le_bytes([ix_data[4], ix_data[5]]);
-    let pubkey_offset = u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
-    let pubkey_ix_index = u16::from_le_bytes([ix_data[8], ix_data[9]]);
-    let msg_offset = u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
-    let msg_size = u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
-    let msg_ix_index = u16::from_le_bytes([ix_data[14], ix_data[15]]);
+        let sig_offset = u16::from_le_bytes([data[entry], data[entry + 1]]) as usize;
+        let sig_ix_index = u16::from_le_bytes([data[entry + 2], data[entry + 3]]);
+        let pk_offset = u16::from_le_bytes([data[entry + 4], data[entry + 5]]) as usize;
+        let pk_ix_index = u16::from_le_bytes([data[entry + 6], data[entry + 7]]);
+        let msg_offset = u16::from_le_bytes([data[entry + 8], data[entry + 9]]) as usize;
+        let msg_size = u16::from_le_bytes([data[entry + 10], data[entry + 11]]) as usize;
+        let msg_ix_index = u16::from_le_bytes([data[entry + 12], data[entry + 13]]);
 
-    // CRITICAL: each instruction_index must be 0xFFFF ("current instruction").
-    // Otherwise the Ed25519 program reads sig/pubkey/message from a DIFFERENT
-    // instruction's data, while our byte-level checks below validate the
-    // current ix's data — the two verifications would operate on independent
-    // data, allowing signature forgery: an attacker could replay a Solana
-    // signature member1 made for ANY message, rebound to our canonical init
-    // message via offset/index manipulation.
-    require!(
-        sig_ix_index == u16::MAX && pubkey_ix_index == u16::MAX && msg_ix_index == u16::MAX,
-        ErrorCode::InvalidSignature
-    );
+        require!(
+            sig_ix_index == u16::MAX && pk_ix_index == u16::MAX && msg_ix_index == u16::MAX,
+            ErrorCode::InvalidSignature
+        );
 
-    // Verify the signature bytes match
-    require!(
-        ix_data.len() >= sig_offset + 64,
-        ErrorCode::InvalidSignature
-    );
-    let ix_signature = &ix_data[sig_offset..sig_offset + 64];
-    require!(ix_signature == signature, ErrorCode::InvalidSignature);
+        // Bounds for sig + pk + message inside the ix data.
+        require!(data.len() >= sig_offset + 64, ErrorCode::InvalidSignature);
+        require!(data.len() >= pk_offset + 32, ErrorCode::InvalidSignature);
+        require!(
+            data.len() >= msg_offset + msg_size,
+            ErrorCode::InvalidSignature
+        );
 
-    // Verify the public key bytes match
-    require!(
-        ix_data.len() >= pubkey_offset + 32,
-        ErrorCode::InvalidSignature
-    );
-    let ix_pubkey = &ix_data[pubkey_offset..pubkey_offset + 32];
-    require!(ix_pubkey == pubkey, ErrorCode::InvalidSignature);
+        // The bytes the Ed25519 program verified MUST be our expected message.
+        require!(
+            msg_size == expected_message.len(),
+            ErrorCode::InvalidSignature
+        );
+        require!(
+            &data[msg_offset..msg_offset + msg_size] == expected_message,
+            ErrorCode::InvalidSignature
+        );
 
-    // Verify the message bytes match
-    require!(
-        ix_data.len() >= msg_offset + msg_size,
-        ErrorCode::InvalidSignature
-    );
-    let ix_message = &ix_data[msg_offset..msg_offset + msg_size];
-    require!(ix_message == message, ErrorCode::InvalidSignature);
+        // Harvest signer; freshness/dedup against member set is the caller's job.
+        let mut pk_bytes = [0u8; 32];
+        pk_bytes.copy_from_slice(&data[pk_offset..pk_offset + 32]);
+        signers.push(Pubkey::new_from_array(pk_bytes));
+    }
 
-    // If we get here, the Ed25519 program has verified this signature!
-    // (The Ed25519 program instruction would have failed if invalid)
-
-    Ok(())
+    Ok(signers)
 }
 
 // ============================================================================
@@ -717,9 +720,6 @@ pub struct Multisig {
 
     /// Counter for transactions
     pub transaction_index: u64,
-
-    /// Whether this multisig is initialized
-    pub is_initialized: bool,
 
     /// PDA bump seed
     pub bump: u8,
@@ -764,20 +764,6 @@ pub struct VaultTransaction {
 
     /// The compact V0-style transaction message.
     pub message: TransactionMessage,
-}
-
-/// Signature data for initialization
-/// Members sign this off-chain and submit for on-chain verification
-#[derive(AnchorSerialize, AnchorDeserialize, Clone)]
-pub struct SignatureData {
-    /// Member who signed
-    pub signer: Pubkey,
-
-    /// Ed25519 signature (64 bytes)
-    pub signature: [u8; 64],
-
-    /// Hash of the message that was signed
-    pub message_hash: [u8; 32],
 }
 
 /// V0-style transaction message stored in a VaultTransaction.
@@ -861,7 +847,7 @@ pub struct DeriveAddress<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(members: Vec<Pubkey>, threshold: u8)]
+#[instruction(member_hash: [u8; 32], threshold: u8)]
 pub struct InitializeMultisig<'info> {
     #[account(
         init,
@@ -869,7 +855,7 @@ pub struct InitializeMultisig<'info> {
         space = 8 + Multisig::INIT_SPACE,
         seeds = [
             b"multisig",
-            &hash_members(&sort_members(&members))[..8],
+            member_hash.as_ref(),
             &[threshold],
         ],
         bump
@@ -888,14 +874,20 @@ pub struct InitializeMultisig<'info> {
 }
 
 #[derive(Accounts)]
+#[instruction(vault_index: u8, message: TransactionMessage)]
 pub struct CreateTransaction<'info> {
     #[account(mut)]
     pub multisig: Account<'info, Multisig>,
 
+    /// Sized to the *actual* bytes this specific proposal needs, not the
+    /// MAX_* upper bounds. Avoids the 10240-byte System-Program CPI realloc
+    /// cap that `init` hits when allocating worst-case-sized accounts.
+    /// Proposals whose computed size exceeds `MAX_PROPOSAL_ACCOUNT_BYTES`
+    /// will fail at `init` with the runtime's realloc error.
     #[account(
         init,
         payer = creator,
-        space = 8 + VaultTransaction::INIT_SPACE,
+        space = compute_proposal_space(&message),
         seeds = [
             b"transaction",
             multisig.key().as_ref(),
@@ -960,15 +952,21 @@ pub struct ExecuteTransaction<'info> {
 // Helper Functions - Phase 1 Core Logic
 // ============================================================================
 
-/// Derive multisig PDA from members and threshold
-/// CRITICAL: NO PRIVATE KEY GENERATION - only PDA derivation
-/// This is what makes it truly self-initiating and secure
+/// Derive multisig PDA from members and threshold.
+///
+/// CRITICAL: NO PRIVATE KEY GENERATION — only PDA derivation. The full
+/// 32-byte sha256 of the sorted member list is used as a seed (not a
+/// truncation): truncating to 8 bytes would give attackers a 2^64 preimage
+/// to find a colliding member set, which combined with the fact that vault
+/// PDAs are derived from the multisig PDA address (not its contents) would
+/// let them steal pre-funded vault balances by initializing the multisig
+/// at the colliding address with their own keys.
 pub fn derive_multisig_pda(members: &[Pubkey], threshold: u8) -> Result<(Pubkey, u8)> {
     let sorted_members = sort_members(members);
     let member_hash = hash_members(&sorted_members);
 
     let (pda, bump) =
-        Pubkey::find_program_address(&[b"multisig", &member_hash[..8], &[threshold]], &crate::ID);
+        Pubkey::find_program_address(&[b"multisig", &member_hash, &[threshold]], &crate::ID);
 
     Ok((pda, bump))
 }
@@ -1001,23 +999,56 @@ fn hash_members(members: &[Pubkey]) -> [u8; 32] {
     hash(&data).to_bytes()
 }
 
-/// Create initialization message for signing
-/// Members sign this message off-chain using their ACTUAL private keys
-/// NOT a deterministic key that can be front-run
+/// Compute the exact bytes a `VaultTransaction` account needs to hold a
+/// proposal carrying `message`. Anchor's `init` constraint reads this to
+/// allocate just-enough space, sidestepping the 10240-byte CPI realloc cap
+/// that `8 + VaultTransaction::INIT_SPACE` would hit (since INIT_SPACE
+/// expands to the worst case across all `#[max_len]` upper bounds).
+///
+/// `approvals` is allocated at full `MAX_MEMBERS` capacity because it grows
+/// over the proposal's lifetime. Everything inside `message` is allocated
+/// to the actual length present at create time — proposals are immutable
+/// after creation, so the message vectors never grow.
+fn compute_proposal_space(message: &TransactionMessage) -> usize {
+    8                                       // anchor discriminator
+    + 32                                    // multisig
+    + 8                                     // transaction_index
+    + 32                                    // creator
+    + 1                                     // bump
+    + 1                                     // vault_index
+    + 1                                     // vault_bump
+    + 1                                     // executed
+    + 4 + MAX_MEMBERS * 32                  // approvals (Vec<Pubkey>, full cap)
+    + 1 + 1 + 1                             // num_signers / num_writable_*
+    + 4 + message.account_keys.len() * 32   // account_keys
+    + 4 + message
+        .instructions
+        .iter()
+        .map(|ix| 1 + 4 + ix.account_indexes.len() + 4 + ix.data.len())
+        .sum::<usize>()                     // instructions (actual)
+    + 4 + message
+        .address_table_lookups
+        .iter()
+        .map(|l| 32 + 4 + l.writable_indexes.len() + 4 + l.readonly_indexes.len())
+        .sum::<usize>() // address_table_lookups (actual)
+}
+
+/// Create the fixed-size init message that members sign off-chain.
+///
+/// Layout (67 bytes total, regardless of member count):
+///   [0..34]  domain separator b"TRULY_SELF_INITIATING_MULTISIG_INIT"
+///   [34..66] sha256(sorted_members concatenated raw bytes) — pins the
+///            signature to a specific member set
+///   [66]     threshold
+///
+/// Hashing the member list (rather than including each pubkey verbatim) is
+/// what lets the Ed25519 verify ix stay small enough that big multisigs fit
+/// inside Solana's 1232-byte transaction cap.
 fn create_initialization_message(members: &[Pubkey], threshold: u8) -> Vec<u8> {
-    let mut message = Vec::new();
-
-    // Add domain separator to prevent signature reuse
+    let mut message = Vec::with_capacity(34 + 32 + 1);
     message.extend_from_slice(b"TRULY_SELF_INITIATING_MULTISIG_INIT");
-
-    // Add members
-    for member in members {
-        message.extend_from_slice(member.as_ref());
-    }
-
-    // Add threshold
+    message.extend_from_slice(&hash_members(members));
     message.push(threshold);
-
     message
 }
 
@@ -1029,8 +1060,16 @@ fn create_initialization_message(members: &[Pubkey], threshold: u8) -> Vec<u8> {
 pub const MAX_MEMBERS: usize = 20;
 
 /// Maximum number of static account keys per transaction message.
-/// These are the accounts referenced directly in the proposal (not via ALT).
-pub const MAX_TX_ACCOUNT_KEYS: usize = 32;
+/// All accounts a proposal references must live here (proposals don't
+/// support ALT references — see address_table_lookups.is_empty() check
+/// in `create_transaction`). 128 is enough headroom for typical Jupiter
+/// routes (~30-50 accounts) and most multi-hop DeFi compositions.
+///
+/// The real ceiling on proposal size is the 10240-byte System Program
+/// CPI realloc cap, enforced via dynamic sizing in `compute_proposal_space`.
+/// Pathological combinations (128 keys × 16 max-data ixs) won't fit and
+/// will fail cleanly at init time with a runtime error.
+pub const MAX_TX_ACCOUNT_KEYS: usize = 128;
 
 /// Maximum number of instructions per transaction proposal.
 pub const MAX_TX_INSTRUCTIONS: usize = 16;
@@ -1048,9 +1087,9 @@ pub const MAX_ADDRESS_TABLE_LOOKUPS: usize = 4;
 
 /// Maximum number of indexes per ALT lookup (writable and readonly each).
 ///
-/// Tuned together with MAX_TX_ACCOUNT_KEYS and MAX_ADDRESS_TABLE_LOOKUPS so
-/// that the maximum combined account count never exceeds Solana's 256-account
-/// per-tx cap (u8 index space).
+/// Tuned alongside MAX_TX_ACCOUNT_KEYS and MAX_ADDRESS_TABLE_LOOKUPS so that
+/// the maximum combined account count never exceeds Solana's 256-account
+/// per-tx cap (u8 index space):
 ///   max_combined = MAX_TX_ACCOUNT_KEYS
 ///                + MAX_ADDRESS_TABLE_LOOKUPS * 2 * MAX_INDEXES_PER_LOOKUP
 ///                = 32 + 4 * 2 * 28 = 256
@@ -1058,6 +1097,15 @@ pub const MAX_INDEXES_PER_LOOKUP: usize = 28;
 
 /// Solana hard cap on accounts per transaction (u8 index space).
 pub const MAX_COMBINED_ACCOUNTS: usize = 256;
+
+/// Solana caps account allocation done via a CPI to the System Program at
+/// 10240 bytes (`MAX_PERMITTED_DATA_LENGTH` for inner ixs). Anchor's `init`
+/// constraint goes through that CPI, so a single proposal can't allocate more
+/// than this. The constants above represent absolute upper bounds — actual
+/// proposals are sized dynamically to the exact bytes they need (most
+/// proposals are well under 1KB), and we reject at create time anything that
+/// would not fit.
+pub const MAX_PROPOSAL_ACCOUNT_BYTES: usize = 10240;
 
 /// PDA seed prefix for vault accounts. Vaults are system-owned PDAs that
 /// hold the actual funds (SOL + SPL tokens) governed by a multisig.
@@ -1090,9 +1138,6 @@ pub enum ErrorCode {
 
     #[msg("Duplicate signature from same member")]
     DuplicateSignature,
-
-    #[msg("Message hash does not match")]
-    InvalidMessageHash,
 
     #[msg("Invalid Ed25519 signature - cryptographic verification failed")]
     InvalidSignature,

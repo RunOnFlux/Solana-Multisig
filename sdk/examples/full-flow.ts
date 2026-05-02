@@ -92,7 +92,21 @@ async function main() {
   // The "payer" is whoever submits + pays the init rent (~0.002 SOL).
   // For SSP this is the relay hot wallet. Here we use member1 for simplicity.
   await airdrop(connection, member1.publicKey, 1 * LAMPORTS_PER_SOL);
-  const initResult = await client.initialize(members, threshold, sigs, member1);
+
+  // Members are passed via an Address Lookup Table — each member costs
+  // ~1 byte in the init tx instead of 32, fitting up to ~7 raw signatures
+  // under Solana's 1232-byte transaction cap.
+  const membersAlt = await client.createMembersAddressLookupTable(
+    members,
+    member1
+  );
+  const initResult = await client.initialize(
+    members,
+    threshold,
+    sigs,
+    member1,
+    membersAlt
+  );
   console.log("Multisig initialized. Tx:", initResult.signature);
 
   // ========================================================================

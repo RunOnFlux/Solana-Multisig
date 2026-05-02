@@ -16,4 +16,13 @@ cluster = "localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
+# Single-validator run. Quick to invoke (`anchor test`) but flakes on
+# block-height-expiry once the ledger has accumulated state from ~50 tests.
+# Useful for smoke-testing a small slice (`-g`); for the full suite prefer
+# `test-reliable` below.
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+
+# Reliable run: each phase file gets its OWN fresh solana-test-validator.
+# Slower wall-clock but every phase starts from a clean ledger so block
+# heights never run out. Invoke with: `anchor run test-reliable`
+test-reliable = "bash scripts/run-tests.sh"

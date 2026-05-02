@@ -344,7 +344,7 @@ describe("Unit Tests", () => {
       const hash = memberHash.digest();
 
       const [address2] = PublicKey.findProgramAddressSync(
-        [Buffer.from("multisig"), hash.slice(0, 8), Buffer.from([1])],
+        [Buffer.from("multisig"), hash, Buffer.from([1])],
         program.programId
       );
 

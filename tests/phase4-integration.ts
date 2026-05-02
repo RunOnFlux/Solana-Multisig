@@ -1,17 +1,15 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
-import {
-  Keypair,
-  PublicKey,
-  SystemProgram,
-  LAMPORTS_PER_SOL,
-  TransactionInstruction,
-  SYSVAR_INSTRUCTIONS_PUBKEY,
-} from "@solana/web3.js";
+import { Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { expect } from "chai";
-import * as crypto from "crypto";
-import * as nacl from "tweetnacl";
+import {
+  sortMembers,
+  signInitMessage,
+  createMembersAlt,
+  sendInitTxViaAlt,
+  type InitSignature,
+} from "./_helpers";
 
 /**
  * Phase 4: Integration Tests
@@ -24,63 +22,6 @@ describe("Integration Tests", () => {
   const program = anchor.workspace
     .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
 
-  const ED25519_PROGRAM_ID = new PublicKey(
-    "Ed25519SigVerify111111111111111111111111111"
-  );
-
-  function buildInitMessageBytes(
-    members: PublicKey[],
-    threshold: number
-  ): Buffer {
-    const sorted = [...members].sort((a, b) =>
-      Buffer.compare(a.toBuffer(), b.toBuffer())
-    );
-    return Buffer.concat([
-      Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
-      ...sorted.map((m) => Buffer.from(m.toBytes())),
-      Buffer.from([threshold]),
-    ]);
-  }
-
-  function makeEd25519VerifyIx(
-    pubkey: PublicKey,
-    message: Buffer,
-    signature: Buffer
-  ): TransactionInstruction {
-    const PUBKEY_OFFSET = 16;
-    const SIG_OFFSET = PUBKEY_OFFSET + 32;
-    const MSG_OFFSET = SIG_OFFSET + 64;
-    const data = Buffer.alloc(MSG_OFFSET + message.length);
-    data.writeUInt8(1, 0);
-    data.writeUInt8(0, 1);
-    data.writeUInt16LE(SIG_OFFSET, 2);
-    data.writeUInt16LE(0xffff, 4);
-    data.writeUInt16LE(PUBKEY_OFFSET, 6);
-    data.writeUInt16LE(0xffff, 8);
-    data.writeUInt16LE(MSG_OFFSET, 10);
-    data.writeUInt16LE(message.length, 12);
-    data.writeUInt16LE(0xffff, 14);
-    pubkey.toBuffer().copy(data, PUBKEY_OFFSET);
-    signature.copy(data, SIG_OFFSET);
-    message.copy(data, MSG_OFFSET);
-    return new TransactionInstruction({
-      keys: [],
-      programId: ED25519_PROGRAM_ID,
-      data,
-    });
-  }
-
-  function makeEd25519Ixs(
-    members: PublicKey[],
-    threshold: number,
-    sigs: Array<{ signer: PublicKey; signature: number[] }>
-  ): TransactionInstruction[] {
-    const message = buildInitMessageBytes(members, threshold);
-    return sigs.map((s) =>
-      makeEd25519VerifyIx(s.signer, message, Buffer.from(s.signature))
-    );
-  }
-
   async function fundAccount(
     pubkey: PublicKey,
     amount: number = 2 * LAMPORTS_PER_SOL
@@ -89,34 +30,52 @@ describe("Integration Tests", () => {
       const sig = await provider.connection.requestAirdrop(pubkey, amount);
       await provider.connection.confirmTransaction(sig);
       await new Promise((resolve) => setTimeout(resolve, 500));
-    } catch (e) {
+    } catch {
       // Continue if airdrop fails
     }
   }
 
+  /** Sign the init message — kept as a thin wrapper for readability. */
   function createSignature(
     members: PublicKey[],
     threshold: number,
     signer: Keypair
-  ) {
-    const sortedMembers = [...members].sort((a, b) =>
-      Buffer.compare(a.toBuffer(), b.toBuffer())
-    );
+  ): InitSignature {
+    return signInitMessage(members, threshold, signer);
+  }
 
-    const message = Buffer.concat([
-      Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
-      ...sortedMembers.map((m) => Buffer.from(m.toBytes())),
-      Buffer.from([threshold]),
-    ]);
-
-    const signature = nacl.sign.detached(message, signer.secretKey);
-    const messageHash = crypto.createHash("sha256").update(message).digest();
-
-    return {
-      signer: signer.publicKey,
-      signature: Array.from(signature),
-      messageHash: Array.from(messageHash),
-    };
+  /**
+   * Submit the init transaction. For small multisigs (≤5 members) we skip
+   * ALT setup and send a legacy tx with members in the static account
+   * list — much faster (no ALT warm-up wait). Larger multisigs need ALT
+   * to fit under the 1232-byte cap.
+   */
+  async function submitInit(opts: {
+    members: PublicKey[];
+    sortedMembers: PublicKey[];
+    threshold: number;
+    sigs: InitSignature[];
+    multisig: PublicKey;
+    payer: Keypair;
+  }): Promise<string> {
+    const useAlt = opts.sortedMembers.length > 5;
+    const alt = useAlt
+      ? await createMembersAlt(
+          provider.connection,
+          opts.payer,
+          opts.sortedMembers
+        )
+      : undefined;
+    return sendInitTxViaAlt({
+      program,
+      connection: provider.connection,
+      multisig: opts.multisig,
+      members: opts.members,
+      threshold: opts.threshold,
+      sigs: opts.sigs,
+      payer: opts.payer,
+      alt,
+    });
   }
 
   describe("Scenario 1: Happy Path - 2-of-3 Multisig", () => {
@@ -163,15 +122,14 @@ describe("Integration Tests", () => {
       console.log(`   ✍️  Collected 2 signatures`);
 
       // Step 4: Initialize
-      const tx = await program.methods
-        .initializeMultisig(sortedMembers, threshold, [sig1, sig2])
-        .accountsPartial({
-          multisig: multisigAddress,
-          payer: member1.publicKey,
-        })
-        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
-        .signers([member1])
-        .rpc();
+      const tx = await submitInit({
+        members,
+        sortedMembers: sortedMembers,
+        threshold: threshold,
+        sigs: [sig1, sig2],
+        multisig: multisigAddress,
+        payer: member1,
+      });
 
       console.log(`   ✅ Initialized: ${tx}`);
 
@@ -179,7 +137,6 @@ describe("Integration Tests", () => {
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
-      expect(multisigAccount.isInitialized).to.be.true;
       expect(multisigAccount.threshold).to.equal(threshold);
       expect(multisigAccount.members.length).to.equal(3);
 
@@ -213,22 +170,20 @@ describe("Integration Tests", () => {
       const sig1 = createSignature(members, threshold, member1);
       const sig2 = createSignature(members, threshold, member2);
 
-      const tx = await program.methods
-        .initializeMultisig(sortedMembers, threshold, [sig1, sig2])
-        .accountsPartial({
-          multisig: multisigAddress,
-          payer: member1.publicKey,
-        })
-        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
-        .signers([member1])
-        .rpc();
+      const tx = await submitInit({
+        members,
+        sortedMembers: sortedMembers,
+        threshold: threshold,
+        sigs: [sig1, sig2],
+        multisig: multisigAddress,
+        payer: member1,
+      });
 
       console.log(`   ✅ Success with exactly ${threshold} signatures`);
 
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
-      expect(multisigAccount.isInitialized).to.be.true;
     });
   });
 
@@ -260,24 +215,20 @@ describe("Integration Tests", () => {
       const sig2 = createSignature(members, threshold, member2);
       const sig3 = createSignature(members, threshold, member3);
 
-      const tx = await program.methods
-        .initializeMultisig(sortedMembers, threshold, [sig1, sig2, sig3])
-        .accountsPartial({
-          multisig: multisigAddress,
-          payer: member1.publicKey,
-        })
-        .preInstructions(
-          makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2, sig3])
-        )
-        .signers([member1])
-        .rpc();
+      const tx = await submitInit({
+        members,
+        sortedMembers: sortedMembers,
+        threshold: threshold,
+        sigs: [sig1, sig2, sig3],
+        multisig: multisigAddress,
+        payer: member1,
+      });
 
       console.log(`   ✅ Success with 3 signatures (threshold is 2)`);
 
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
-      expect(multisigAccount.isInitialized).to.be.true;
     });
   });
 
@@ -306,15 +257,14 @@ describe("Integration Tests", () => {
       const sig1 = createSignature(members, threshold, member1);
       const sig2 = createSignature(members, threshold, member2);
 
-      const tx = await program.methods
-        .initializeMultisig(sortedMembers, threshold, [sig1, sig2])
-        .accountsPartial({
-          multisig: multisigAddress,
-          payer: payer.publicKey, // Non-member paying
-        })
-        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
-        .signers([payer])
-        .rpc();
+      const tx = await submitInit({
+        members,
+        sortedMembers,
+        threshold,
+        sigs: [sig1, sig2],
+        multisig: multisigAddress,
+        payer, // non-member paying
+      });
 
       console.log(`   ✅ Non-member successfully paid for initialization`);
       console.log(`   ✅ This proves payer ≠ controller`);
@@ -322,7 +272,6 @@ describe("Integration Tests", () => {
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
-      expect(multisigAccount.isInitialized).to.be.true;
     });
   });
 
@@ -339,9 +288,7 @@ describe("Integration Tests", () => {
         await fundAccount(members[i].publicKey);
       }
 
-      const sortedMembers = [...memberPubkeys].sort((a, b) =>
-        Buffer.compare(a.toBuffer(), b.toBuffer())
-      );
+      const sortedMembers = sortMembers(memberPubkeys);
 
       const multisigAddress = await program.methods
         .deriveAddress(sortedMembers, threshold)
@@ -352,17 +299,16 @@ describe("Integration Tests", () => {
         .slice(0, 7)
         .map((member) => createSignature(memberPubkeys, threshold, member));
 
-      const tx = await program.methods
-        .initializeMultisig(sortedMembers, threshold, signatures)
-        .accountsPartial({
-          multisig: multisigAddress,
-          payer: members[0].publicKey,
-        })
-        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, signatures))
-        .signers([members[0]])
-        .rpc();
+      const tx = await submitInit({
+        members: memberPubkeys,
+        sortedMembers,
+        threshold,
+        sigs: signatures,
+        multisig: multisigAddress,
+        payer: members[0],
+      });
 
-      console.log(`   ✅ 7-of-10 multisig initialized successfully`);
+      console.log(`   ✅ 7-of-10 multisig initialized successfully: ${tx}`);
 
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
@@ -408,15 +354,14 @@ describe("Integration Tests", () => {
       const sig1 = createSignature(members, threshold, member1);
       const sig2 = createSignature(members, threshold, member2);
 
-      await program.methods
-        .initializeMultisig(sortedMembers, threshold, [sig1, sig2])
-        .accountsPartial({
-          multisig: multisigAddress,
-          payer: member1.publicKey,
-        })
-        .preInstructions(makeEd25519Ixs(sortedMembers, threshold, [sig1, sig2]))
-        .signers([member1])
-        .rpc();
+      await submitInit({
+        members,
+        sortedMembers: sortedMembers,
+        threshold: threshold,
+        sigs: [sig1, sig2],
+        multisig: multisigAddress,
+        payer: member1,
+      });
 
       // Verify funds are still there after initialization
       const balance2 = await provider.connection.getBalance(multisigAddress);
