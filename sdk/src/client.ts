@@ -258,8 +258,8 @@ export class TrulySelfInitiatingMultisigClient {
       this.programId
     );
 
-    // Pre-compute member_hash for the program — must match what's used as
-    // PDA seed bytes (first 8 bytes of sha256(sorted_members)).
+    // Pre-compute member_hash for the program — full 32-byte sha256 of the
+    // sorted member pubkeys, also used as the PDA seed.
     const memberHash = hashMembers(sortedMembers);
 
     const message = createInitializationMessage(members, threshold);
