@@ -20,15 +20,14 @@
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
     "@solana/web3.js": "^1.95.8",
-    "tweetnacl": "^1.0.3",
-    "bs58": "^5.0.0"
+    "bs58": "^5.0.0",
+    "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.0",
     "@types/node": "^20.0.0",
-    "typescript": "^5.7.3",
-    "ts-node": "^10.9.0",
     "mocha": "^10.0.0",
-    "@types/mocha": "^10.0.0"
+    "ts-node": "^10.9.0",
+    "typescript": "^5.7.3"
   }
 }
-

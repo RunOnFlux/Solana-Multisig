@@ -5,7 +5,16 @@ use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program::invoke_signed;
 use anchor_lang::solana_program::sysvar::instructions::{self, load_instruction_at_checked};
 
-declare_id!("F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo");
+declare_id!("CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX");
+
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "SSP Truly Self-Initiating Multisig",
+    project_url: "https://sspwallet.com",
+    contacts: "email:tadeas@runonflux.com",
+    policy: "Responsible disclosure: please report any security issues via email to tadeas@runonflux.com. Critical vulnerabilities affecting user funds will be acknowledged within 24 hours.",
+    preferred_languages: "en"
+}
 
 /// Like `require!`, but logs a specific reason via `msg!` before returning.
 /// Used for generic error codes (e.g., `InvalidMessage`) that cover many

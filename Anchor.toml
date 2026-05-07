@@ -6,7 +6,10 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-truly_self_initiating_multisig = "F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo"
+truly_self_initiating_multisig = "CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX"
+
+[programs.devnet]
+truly_self_initiating_multisig = "CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX"
 
 [registry]
 url = "https://api.apr.dev"
