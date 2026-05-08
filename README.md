@@ -123,6 +123,26 @@ Tests live in `tests/`:
 - `phase4-unit.ts` — view function unit tests
 - `phase5-transactions.ts` — full proposal lifecycle (create / approve / execute)
 
+## How this differs from Squads V4
+
+The actual program-level differentiators (no UX layers, no infrastructure, just protocol):
+
+1. **Truly self-initiating** — multisig PDA = `find_program_address([b"multisig", sha256(sorted_members), &[threshold]])`. Anyone can derive the address before any on-chain action, anyone can pre-fund it, but only threshold member signatures can ever initialize. Squads V4 requires a `creator` who calls `multisig_create_v2` with a random `create_key`; the address is unknowable until creation, and the creator is a single point of trust at setup.
+
+2. **No private key exists, ever** — for a given `(members, threshold)`, the address is purely a function of those inputs hashed into PDA seeds. Same config = same address, deterministically. No creator-supplied randomness, no key generation.
+
+3. **No front-running at init** — different configs produce different PDAs, and `initialize_multisig` binds the PDA to the actual member set at init via the 32-byte hash check (`actual_hash == member_hash`). An attacker with different members or threshold derives a different address — they can't squat on a victim's deterministic vault.
+
+4. **On-chain Ed25519 verification of the init message** — `initialize_multisig` reads the batched Ed25519 native ix at tx index 0 and harvests verified signers. Init can only succeed when threshold members have actually signed the prefix-domain-separated init message (`SOLANA_MULTISIG_INIT || sha256(sorted_members) || threshold`) off-chain.
+
+5. **ALT-rejection in proposals (Option D)** — `create_transaction` rejects non-empty `address_table_lookups`, preventing executor-side ALT substitution attacks where someone could swap a different ALT at execute time to redirect CPI destinations.
+
+### What's not a differentiator
+
+**Fee sponsorship / paymaster** — any wallet on top of any Solana multisig can layer on a paymaster (Squads-using wallets like Fuse and Backpack ship comparable sponsored-fee experiences without changing the underlying multisig). SSP Wallet runs a paymaster via the open-source ssp-relay so users don't need SOL in their leaf keypair, but that's a UX choice, not a protocol-level difference.
+
+The program-level differences above are what actually distinguish this design.
+
 ## Status
 
 - ✅ Compiles clean (`cargo check`)
