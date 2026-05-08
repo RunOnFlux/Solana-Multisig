@@ -1,6 +1,6 @@
 {
   "name": "@runonflux/solana-multisig",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "TypeScript SDK for SSP Solana Multisig",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -15,12 +15,11 @@
     "self-initiating",
     "blockchain"
   ],
-  "author": "",
+  "author": "Tadeas Kmenta <tadeas@runonflux.com>",
   "license": "MIT",
   "dependencies": {
     "@coral-xyz/anchor": "^0.31.1",
-    "@solana/web3.js": "^1.95.8",
-    "bs58": "^5.0.0",
+    "@solana/web3.js": "^1.98.4",
     "tweetnacl": "^1.0.3"
   },
   "devDependencies": {
