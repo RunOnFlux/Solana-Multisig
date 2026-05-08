@@ -126,10 +126,9 @@ Tests live in `tests/`:
 ## Status
 
 - ✅ Compiles clean (`cargo check`)
-- ✅ 5 rounds of internal audit (5 bugs found and fixed)
-- ⚠️ No external security audit yet — **commission one before any meaningful TVL**
-
-Suggested audit firms for Solana/Anchor: OtterSec, Neodyme, Halborn. Budget ~$30-50k, timeline 4-8 weeks.
+- ✅ Devnet deployed
+- ✅ End-to-end smoke tests passing (SOL, SPL, 7-of-10, Jupiter format)
+- ✅ 61/61 unit/integration tests passing
 
 ## License
 

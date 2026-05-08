@@ -54,8 +54,8 @@ export class SolanaMultisigClient {
       { commitment: "confirmed" }
     );
 
-    // Load program IDL
-    const idl = require("../../target/idl/solana_multisig.json");
+    // Load program IDL (bundled in the SDK)
+    const idl = require("./idl/solana_multisig.json");
     this.program = new Program(idl, this.provider);
   }
 

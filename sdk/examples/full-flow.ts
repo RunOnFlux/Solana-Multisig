@@ -35,10 +35,10 @@ import { SolanaMultisigClient } from "../src";
 import { deriveVaultAddress } from "../src/utils";
 
 const PROGRAM_ID = new PublicKey(
-  "F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo"
+  "CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX"
 );
 const VAULT_INDEX = 0;
-const RPC_URL = "http://localhost:8899";
+const RPC_URL = "https://api.devnet.solana.com";
 
 async function main() {
   const connection = new Connection(RPC_URL, "confirmed");

@@ -1,0 +1,788 @@
+{
+  "address": "CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX",
+  "metadata": {
+    "name": "solana_multisig",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "SSP Solana Multisig — self-initiating M-of-N multisig program"
+  },
+  "instructions": [
+    {
+      "name": "approve_transaction",
+      "docs": [
+        "Approve a transaction proposal. Each member can approve once."
+      ],
+      "discriminator": [
+        224,
+        39,
+        88,
+        181,
+        36,
+        59,
+        155,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "multisig"
+        },
+        {
+          "name": "transaction",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  97,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "multisig"
+              },
+              {
+                "kind": "arg",
+                "path": "transaction_index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "member",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "transaction_index",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "create_transaction",
+      "docs": [
+        "Create a transaction proposal targeting a specific vault under the multisig.",
+        "",
+        "The proposal stores a V0-style transaction message that members vote on.",
+        "Multiple proposals can be in flight without colliding because the",
+        "multisig.transaction_index counter is incremented atomically here at",
+        "create time (not at execute).",
+        "",
+        "Convention: `account_keys[0]` MUST be the vault PDA at `vault_index`.",
+        "At execute time we sign for that PDA via invoke_signed using the cached",
+        "`vault_bump` stored on the proposal."
+      ],
+      "discriminator": [
+        227,
+        193,
+        53,
+        239,
+        55,
+        126,
+        112,
+        105
+      ],
+      "accounts": [
+        {
+          "name": "multisig",
+          "writable": true
+        },
+        {
+          "name": "transaction",
+          "docs": [
+            "Sized to the *actual* bytes this specific proposal needs, not the",
+            "MAX_* upper bounds. Avoids the 10240-byte System-Program CPI realloc",
+            "cap that `init` hits when allocating worst-case-sized accounts.",
+            "Proposals whose computed size exceeds `MAX_PROPOSAL_ACCOUNT_BYTES`",
+            "will fail at `init` with the runtime's realloc error."
+          ],
+          "writable": true
+        },
+        {
+          "name": "creator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "vault_index",
+          "type": "u8"
+        },
+        {
+          "name": "message",
+          "type": {
+            "defined": {
+              "name": "TransactionMessage"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "derive_address",
+      "docs": [
+        "Derive the multisig address for given members and threshold",
+        "This is a view function - no state changes, just returns the deterministic PDA"
+      ],
+      "discriminator": [
+        71,
+        80,
+        81,
+        36,
+        12,
+        97,
+        208,
+        191
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "docs": [
+            "Any account can call this view function"
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "members",
+          "type": {
+            "vec": "pubkey"
+          }
+        },
+        {
+          "name": "threshold",
+          "type": "u8"
+        }
+      ],
+      "returns": "pubkey"
+    },
+    {
+      "name": "derive_vault_address",
+      "docs": [
+        "Derive the vault address for given members, threshold, and vault_index.",
+        "Vaults are SystemProgram-owned PDAs (no data) where funds live.",
+        "Customer-facing: this is the address users send SOL/SPL tokens TO."
+      ],
+      "discriminator": [
+        121,
+        14,
+        203,
+        102,
+        197,
+        57,
+        17,
+        238
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "docs": [
+            "Any account can call this view function"
+          ],
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "members",
+          "type": {
+            "vec": "pubkey"
+          }
+        },
+        {
+          "name": "threshold",
+          "type": "u8"
+        },
+        {
+          "name": "vault_index",
+          "type": "u8"
+        }
+      ],
+      "returns": "pubkey"
+    },
+    {
+      "name": "execute_transaction",
+      "docs": [
+        "Execute a transaction once threshold is reached.",
+        "",
+        "CPIs each compiled instruction with the multisig PDA as the signer",
+        "(via invoke_signed). Resolves account_indexes against the combined",
+        "account list (static account_keys + ALT-loaded accounts).",
+        "",
+        "`remaining_accounts` is expected in the following order, matching",
+        "Solana's V0 transaction loading convention:",
+        "1. All static accounts in `message.account_keys` order",
+        "2. All ALT-loaded WRITABLE accounts in lookup order",
+        "(lookup 0 writable_indexes in order, then lookup 1, ...)",
+        "3. All ALT-loaded READONLY accounts in lookup order",
+        "4. Optional: the program_id accounts (if not already covered above)",
+        "",
+        "The client MUST construct the outer execute_transaction tx as a V0",
+        "transaction with ALT lookups so the runtime resolves the addresses",
+        "before our program runs. Our program only sees the resolved AccountInfos."
+      ],
+      "discriminator": [
+        231,
+        173,
+        49,
+        91,
+        235,
+        24,
+        68,
+        19
+      ],
+      "accounts": [
+        {
+          "name": "multisig",
+          "docs": [
+            "Read-only — execute_transaction never writes to multisig fields. Keeping",
+            "this immutable prevents Anchor's auto-exit from re-serializing the",
+            "cached struct at function end, which would otherwise overwrite any",
+            "mutations made by recursive CPIs (e.g. a malicious proposal CPI'ing",
+            "into create_transaction). Side benefit: blocks recursive",
+            "create_transaction calls entirely (their constraint requires the outer",
+            "tx to mark multisig writable, which conflicts with this immutability)."
+          ]
+        },
+        {
+          "name": "transaction",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  97,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "multisig"
+              },
+              {
+                "kind": "arg",
+                "path": "transaction_index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "executor",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "transaction_index",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "initialize_multisig",
+      "docs": [
+        "Initialize a self-initiating multisig.",
+        "",
+        "Members are passed via `remaining_accounts` (typically resolved from",
+        "an Address Lookup Table the client set up beforehand) so they cost",
+        "only ~1 byte each in the transaction instead of 32. This is what",
+        "lets us fit \"any 7-of-N\" multisigs (single-sig mode) into Solana's",
+        "1232-byte transaction cap.",
+        "",
+        "`member_hash` is `sha256(sorted_members)` computed off-chain by the",
+        "client and used to derive the multisig PDA. The function recomputes",
+        "the hash from the actual `remaining_accounts` and rejects if it",
+        "disagrees — this binds the PDA address to the on-chain stored",
+        "member set.",
+        "",
+        "SECURITY: each member signs a fixed-size init message off-chain",
+        "(`prefix || sha256(sorted_members) || threshold` — 53 bytes",
+        "regardless of N). The SDK packs all signatures into a single",
+        "Ed25519 native-program instruction at index 0 of the same tx; we",
+        "read it via the Instructions Sysvar, confirm it verified OUR init",
+        "message, and harvest the list of signers.",
+        "",
+        "NO DETERMINISTIC PRIVATE KEYS — only member signatures verified",
+        "on-chain via the native Ed25519 program."
+      ],
+      "discriminator": [
+        220,
+        130,
+        117,
+        21,
+        27,
+        227,
+        78,
+        213
+      ],
+      "accounts": [
+        {
+          "name": "multisig",
+          "writable": true
+        },
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "instructions_sysvar",
+          "docs": [
+            "Instructions Sysvar for Ed25519 signature verification"
+          ],
+          "address": "Sysvar1nstructions1111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "member_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "threshold",
+          "type": "u8"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Multisig",
+      "discriminator": [
+        224,
+        116,
+        121,
+        186,
+        68,
+        161,
+        79,
+        236
+      ]
+    },
+    {
+      "name": "VaultTransaction",
+      "discriminator": [
+        168,
+        250,
+        162,
+        100,
+        81,
+        14,
+        162,
+        207
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "InvalidThreshold",
+      "msg": "Invalid threshold: must be > 0 and <= number of members"
+    },
+    {
+      "code": 6001,
+      "name": "TooManyMembers",
+      "msg": "Too many members: maximum is 20"
+    },
+    {
+      "code": 6002,
+      "name": "DuplicateMembers",
+      "msg": "Duplicate members not allowed"
+    },
+    {
+      "code": 6003,
+      "name": "InsufficientSignatures",
+      "msg": "Insufficient signatures provided"
+    },
+    {
+      "code": 6004,
+      "name": "InvalidPDA",
+      "msg": "Invalid PDA derivation"
+    },
+    {
+      "code": 6005,
+      "name": "UnauthorizedSigner",
+      "msg": "Signer is not an authorized member"
+    },
+    {
+      "code": 6006,
+      "name": "DuplicateSignature",
+      "msg": "Duplicate signature from same member"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidSignature",
+      "msg": "Invalid Ed25519 signature - cryptographic verification failed"
+    },
+    {
+      "code": 6008,
+      "name": "UnauthorizedMember",
+      "msg": "Member is not authorized for this multisig"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidTransaction",
+      "msg": "Invalid transaction"
+    },
+    {
+      "code": 6010,
+      "name": "InvalidTransactionIndex",
+      "msg": "Invalid transaction index"
+    },
+    {
+      "code": 6011,
+      "name": "AlreadyApproved",
+      "msg": "Transaction already approved by this member"
+    },
+    {
+      "code": 6012,
+      "name": "AlreadyExecuted",
+      "msg": "Transaction already executed"
+    },
+    {
+      "code": 6013,
+      "name": "InsufficientApprovals",
+      "msg": "Insufficient approvals to execute"
+    },
+    {
+      "code": 6014,
+      "name": "CpiExecutionFailed",
+      "msg": "CPI execution failed"
+    },
+    {
+      "code": 6015,
+      "name": "InvalidMessage",
+      "msg": "Transaction message is malformed or violates structural invariants"
+    },
+    {
+      "code": 6016,
+      "name": "TransactionIndexOverflow",
+      "msg": "Transaction index counter overflow"
+    },
+    {
+      "code": 6017,
+      "name": "InsufficientRemainingAccounts",
+      "msg": "remaining_accounts has fewer entries than the proposal requires"
+    },
+    {
+      "code": 6018,
+      "name": "AccountMismatch",
+      "msg": "Provided account does not match the static account_keys entry"
+    }
+  ],
+  "types": [
+    {
+      "name": "CompiledInstruction",
+      "docs": [
+        "A compiled instruction. Accounts and program are referenced by index into",
+        "the combined account list (static account_keys + ALT-loaded accounts)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "program_id_index",
+            "docs": [
+              "Index of the program in the combined account list."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "account_indexes",
+            "docs": [
+              "Indices of the instruction's accounts in the combined list."
+            ],
+            "type": "bytes"
+          },
+          {
+            "name": "data",
+            "docs": [
+              "Instruction data."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MessageAddressTableLookup",
+      "docs": [
+        "Reference to an Address Lookup Table for compactly loading many accounts."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "account_key",
+            "docs": [
+              "The on-chain ALT account address."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "writable_indexes",
+            "docs": [
+              "Indices into the ALT pointing to writable accounts to load."
+            ],
+            "type": "bytes"
+          },
+          {
+            "name": "readonly_indexes",
+            "docs": [
+              "Indices into the ALT pointing to readonly accounts to load."
+            ],
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Multisig",
+      "docs": [
+        "Multisig account - stores configuration and state",
+        "This is the core of our self-initiating design"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "members",
+            "docs": [
+              "Sorted member public keys"
+            ],
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "threshold",
+            "docs": [
+              "Required number of signatures"
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "transaction_index",
+            "docs": [
+              "Counter for transactions"
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump seed"
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TransactionMessage",
+      "docs": [
+        "V0-style transaction message stored in a VaultTransaction.",
+        "",
+        "Mirrors Solana's MessageV0 but omits recent_blockhash (re-signed at execute)",
+        "and fee_payer (the multisig PDA implicitly signs via invoke_signed).",
+        "",
+        "Account ordering convention (matches Solana runtime):",
+        "account_keys = [",
+        "0..num_writable_signers           : writable signers (vault PDA at 0),",
+        "num_writable_signers..num_signers : readonly signers,",
+        "num_signers..num_signers+num_writable_non_signers : writable non-signers,",
+        "...                               : readonly non-signers,",
+        "]",
+        "Then ALT-loaded accounts append in the order:",
+        "[ all writable from address_table_lookups, all readonly from address_table_lookups ]"
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "num_signers",
+            "docs": [
+              "Total signer count in account_keys."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "num_writable_signers",
+            "docs": [
+              "Number of writable signers (writable signers come first in account_keys)."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "num_writable_non_signers",
+            "docs": [
+              "Number of writable non-signers in account_keys (after the signers block)."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "account_keys",
+            "docs": [
+              "Static account keys. By convention, the multisig PDA must be at index 0",
+              "as the canonical writable signer."
+            ],
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "instructions",
+            "docs": [
+              "Compiled instructions referencing accounts by 1-byte index."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "CompiledInstruction"
+                }
+              }
+            }
+          },
+          {
+            "name": "address_table_lookups",
+            "docs": [
+              "Address Lookup Table references for compactly referencing many accounts."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "MessageAddressTableLookup"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultTransaction",
+      "docs": [
+        "Transaction proposal account",
+        "",
+        "Stores a compact, V0-style transaction message that members vote on.",
+        "Account keys are listed once in `message.account_keys` and referenced",
+        "by 1-byte index in compiled instructions, providing big storage savings",
+        "for proposals that touch many accounts (e.g. Jupiter swaps)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "multisig",
+            "docs": [
+              "Multisig this transaction belongs to."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "transaction_index",
+            "docs": [
+              "Transaction index (matches multisig.transaction_index counter at create time)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "creator",
+            "docs": [
+              "Member who created the proposal."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "PDA bump."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "vault_index",
+            "docs": [
+              "Which vault under the multisig this proposal targets. The vault PDA",
+              "at this index is the canonical signer for inner instructions (typically",
+              "`account_keys[0]` in the message)."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "vault_bump",
+            "docs": [
+              "Cached bump for the vault PDA. Avoids the find_program_address cost at",
+              "execute time."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "executed",
+            "docs": [
+              "Whether transaction has been executed."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "approvals",
+            "docs": [
+              "Members who have approved."
+            ],
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "message",
+            "docs": [
+              "The compact V0-style transaction message."
+            ],
+            "type": {
+              "defined": {
+                "name": "TransactionMessage"
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

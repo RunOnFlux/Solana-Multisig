@@ -1,13 +1,18 @@
 {
   "name": "@runonflux/solana-multisig",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "TypeScript SDK for SSP Solana Multisig",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && mkdir -p dist/idl && cp src/idl/solana_multisig.json dist/idl/",
     "test": "mocha -r ts-node/register tests/**/*.test.ts",
-    "example": "ts-node examples/full-flow.ts"
+    "example": "ts-node examples/full-flow.ts",
+    "prepublishOnly": "yarn build"
   },
   "keywords": [
     "solana",
