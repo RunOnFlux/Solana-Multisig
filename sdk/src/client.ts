@@ -561,4 +561,205 @@ export class SolanaMultisigClient {
       return null;
     }
   }
+
+  // ==========================================================================
+  // Composable instruction builders.
+  //
+  // These return raw `TransactionInstruction` objects without sending them, so
+  // callers can bundle multiple program ixs into a single Solana transaction.
+  // The SSP 2-of-2 send flow uses this to combine create/approve/approve/execute
+  // (plus optional initialize_multisig + Ed25519 verify on first send) into one
+  // atomic, single-broadcast transaction signed by both wallet and key.
+  //
+  // The high-level methods above (initialize, createTransaction, etc.) wrap
+  // these into auto-broadcast helpers for simpler one-off use cases.
+  // ==========================================================================
+
+  /**
+   * Derive the (transactionAddress, transactionIndex) pair for the proposal
+   * that will be created NEXT given the current on-chain transaction_index.
+   *
+   * The caller is responsible for passing the current index — fetch it via
+   * `getMultisig(addr)` and use `multisig.transactionIndex` if you don't
+   * already have it.
+   */
+  predictNextTransactionPda(
+    multisigAddress: PublicKey,
+    currentTransactionIndex: bigint
+  ): { transactionAddress: PublicKey; transactionIndex: bigint } {
+    const transactionIndex = currentTransactionIndex + BigInt(1);
+    const [transactionAddress] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("transaction"),
+        multisigAddress.toBytes(),
+        new anchor.BN(transactionIndex.toString()).toArrayLike(Buffer, "le", 8),
+      ],
+      this.programId
+    );
+    return { transactionAddress, transactionIndex };
+  }
+
+  /**
+   * Build the `initialize_multisig` instruction (ix only — does not include
+   * the batched Ed25519 verify ix, which the caller must place at tx index 0).
+   *
+   * Pair with {@link createBatchedEd25519InstructionForInit}.
+   */
+  async buildInitializeMultisigInstruction(opts: {
+    members: PublicKey[];
+    threshold: number;
+    payer: PublicKey;
+  }): Promise<{
+    instruction: TransactionInstruction;
+    multisigAddress: PublicKey;
+    bump: number;
+  }> {
+    validateConfig(opts.members, opts.threshold);
+    const sortedMembers = sortMembers(opts.members);
+    const [multisigAddress, bump] = deriveMultisigAddress(
+      sortedMembers,
+      opts.threshold,
+      this.programId
+    );
+    const memberHash = hashMembers(sortedMembers);
+    const instruction = await this.program.methods
+      .initializeMultisig(Array.from(memberHash), opts.threshold)
+      .accounts({
+        multisig: multisigAddress,
+        payer: opts.payer,
+        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .remainingAccounts(
+        sortedMembers.map((pubkey) => ({
+          pubkey,
+          isSigner: false,
+          isWritable: false,
+        }))
+      )
+      .instruction();
+    return { instruction, multisigAddress, bump };
+  }
+
+  /**
+   * Build the `create_transaction` instruction (ix only).
+   * Returns the next transaction PDA + index alongside the ix.
+   *
+   * `currentTransactionIndex` should be the on-chain `multisig.transactionIndex`.
+   * For first send right after `initialize_multisig`, pass `0n`.
+   */
+  async buildCreateTransactionInstruction(opts: {
+    multisigAddress: PublicKey;
+    currentTransactionIndex: bigint;
+    vaultIndex: number;
+    message: TransactionMessage;
+    creator: PublicKey;
+  }): Promise<{
+    instruction: TransactionInstruction;
+    transactionAddress: PublicKey;
+    transactionIndex: bigint;
+  }> {
+    const { transactionAddress, transactionIndex } =
+      this.predictNextTransactionPda(
+        opts.multisigAddress,
+        opts.currentTransactionIndex
+      );
+
+    const onchainMessage = {
+      numSigners: opts.message.numSigners,
+      numWritableSigners: opts.message.numWritableSigners,
+      numWritableNonSigners: opts.message.numWritableNonSigners,
+      accountKeys: opts.message.accountKeys,
+      instructions: opts.message.instructions.map((ix) => ({
+        programIdIndex: ix.programIdIndex,
+        accountIndexes: Buffer.from(ix.accountIndexes),
+        data: Buffer.from(ix.data),
+      })),
+      addressTableLookups: opts.message.addressTableLookups.map((l) => ({
+        accountKey: l.accountKey,
+        writableIndexes: Buffer.from(l.writableIndexes),
+        readonlyIndexes: Buffer.from(l.readonlyIndexes),
+      })),
+    };
+
+    const instruction = await this.program.methods
+      .createTransaction(opts.vaultIndex, onchainMessage)
+      .accounts({
+        multisig: opts.multisigAddress,
+        transaction: transactionAddress,
+        creator: opts.creator,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+
+    return { instruction, transactionAddress, transactionIndex };
+  }
+
+  /**
+   * Build the `approve_transaction` instruction (ix only).
+   * The `member` pubkey must be a Signer in the surrounding tx; the SDK
+   * does NOT add any signers — caller controls signing.
+   */
+  async buildApproveTransactionInstruction(opts: {
+    multisigAddress: PublicKey;
+    transactionAddress: PublicKey;
+    transactionIndex: bigint;
+    member: PublicKey;
+  }): Promise<TransactionInstruction> {
+    return this.program.methods
+      .approveTransaction(new anchor.BN(opts.transactionIndex.toString()))
+      .accounts({
+        multisig: opts.multisigAddress,
+        transaction: opts.transactionAddress,
+        member: opts.member,
+      })
+      .instruction();
+  }
+
+  /**
+   * Build the `execute_transaction` instruction (ix only).
+   * `remainingAccounts` must include all accounts referenced by the proposal's
+   * `account_keys` in order, with proper isWritable flags.
+   */
+  async buildExecuteTransactionInstruction(opts: {
+    multisigAddress: PublicKey;
+    transactionAddress: PublicKey;
+    transactionIndex: bigint;
+    executor: PublicKey;
+    remainingAccounts: Array<{
+      pubkey: PublicKey;
+      isSigner: boolean;
+      isWritable: boolean;
+    }>;
+  }): Promise<TransactionInstruction> {
+    return this.program.methods
+      .executeTransaction(new anchor.BN(opts.transactionIndex.toString()))
+      .accounts({
+        multisig: opts.multisigAddress,
+        transaction: opts.transactionAddress,
+        executor: opts.executor,
+      })
+      .remainingAccounts(opts.remainingAccounts)
+      .instruction();
+  }
+
+  // ==========================================================================
+  // High-level helper for the SSP 2-of-2 single-tx send pattern.
+  //
+  // SSP exchanges 42 leaf Ed25519 pubkeys per side at pair time; each address
+  // index has its own multisig (members = [walletPubkey[i], keyPubkey[i]]).
+  // A send for address index `i` becomes a single Solana tx containing:
+  //
+  //   ix[0] = (optional) ed25519_verify_batched     ← only on first init
+  //   ix[1] = (optional) initialize_multisig         ← only on first init
+  //   ix[N] = create_transaction
+  //   ix[N+1] = approve_transaction (wallet member)
+  //   ix[N+2] = approve_transaction (key member)
+  //   ix[N+3] = execute_transaction
+  //
+  // Both wallet and key partial-sign the resulting tx (each provides its
+  // member-level Ed25519 signature). Wallet handles creator + first approve;
+  // key handles second approve + execute (or any signer combination — the
+  // tx requires both signatures regardless).
+  // ==========================================================================
 }

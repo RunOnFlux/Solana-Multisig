@@ -156,6 +156,63 @@ See [`examples/full-flow.ts`](./examples/full-flow.ts) for a complete end-to-end
 | `getMultisig(address)` | Fetch on-chain multisig state. |
 | `getTransaction(address)` | Fetch on-chain proposal state. |
 
+### Composable instruction builders (low-level)
+
+For bundling multiple program calls into a single Solana transaction (e.g., for atomic 2-of-2 single-tx send flows), use the ix-only builders. They return raw `TransactionInstruction` objects without sending them, so callers control signing and broadcasting.
+
+| Method | Returns | Use for |
+|---|---|---|
+| `predictNextTransactionPda(multisig, currentIndex)` | `{ transactionAddress, transactionIndex }` | Compute the next proposal PDA before fetching it on-chain. |
+| `buildInitializeMultisigInstruction(opts)` | `{ instruction, multisigAddress, bump }` | Bundle init into a multi-ix tx alongside `createBatchedEd25519Instruction`. |
+| `buildCreateTransactionInstruction(opts)` | `{ instruction, transactionAddress, transactionIndex }` | Build a proposal ix without auto-sending. |
+| `buildApproveTransactionInstruction(opts)` | `TransactionInstruction` | Build an approval ix; member must be a tx-level signer. |
+| `buildExecuteTransactionInstruction(opts)` | `TransactionInstruction` | Build an execute ix with explicit `remainingAccounts`. |
+
+Example — 2-of-2 single-tx send (init + create + 2 approvals + execute, signed by both members and broadcast atomically):
+
+```typescript
+const { instruction: initIx, multisigAddress } =
+  await client.buildInitializeMultisigInstruction({
+    members: [walletPubkey, keyPubkey],
+    threshold: 2,
+    payer: walletPubkey,
+  });
+
+const ed25519Ix = createBatchedEd25519Instruction(initSignatures, initMessage);
+
+const { instruction: createIx, transactionAddress, transactionIndex } =
+  await client.buildCreateTransactionInstruction({
+    multisigAddress,
+    currentTransactionIndex: 0n, // fresh init → next index is 1
+    vaultIndex: 0,
+    message: txMessage,
+    creator: walletPubkey,
+  });
+
+const approveWalletIx = await client.buildApproveTransactionInstruction({
+  multisigAddress, transactionAddress, transactionIndex, member: walletPubkey,
+});
+const approveKeyIx = await client.buildApproveTransactionInstruction({
+  multisigAddress, transactionAddress, transactionIndex, member: keyPubkey,
+});
+const executeIx = await client.buildExecuteTransactionInstruction({
+  multisigAddress, transactionAddress, transactionIndex,
+  executor: walletPubkey,
+  remainingAccounts: [/* in account_keys order */],
+});
+
+// Bundle into one tx; both wallet and key partial-sign before broadcast.
+const tx = new Transaction().add(
+  ed25519Ix, initIx, createIx, approveWalletIx, approveKeyIx, executeIx,
+);
+tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+tx.feePayer = walletPubkey;
+tx.partialSign(walletKeypair);  // adds wallet's Ed25519 sig
+// ... send to key device for partial-signing ...
+tx.partialSign(keyKeypair);      // adds key's Ed25519 sig
+const sig = await connection.sendRawTransaction(tx.serialize());
+```
+
 ## Limits
 
 | | Value |
