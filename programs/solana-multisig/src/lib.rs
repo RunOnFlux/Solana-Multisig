@@ -9,7 +9,7 @@ declare_id!("CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX");
 
 #[cfg(not(feature = "no-entrypoint"))]
 solana_security_txt::security_txt! {
-    name: "SSP Truly Self-Initiating Multisig",
+    name: "SSP Solana Multisig",
     project_url: "https://sspwallet.com",
     contacts: "email:tadeas@runonflux.com",
     policy: "Responsible disclosure: please report any security issues via email to tadeas@runonflux.com. Critical vulnerabilities affecting user funds will be acknowledged within 24 hours.",
@@ -30,7 +30,7 @@ macro_rules! require_msg {
 }
 
 #[program]
-pub mod truly_self_initiating_multisig {
+pub mod solana_multisig {
     use super::*;
 
     /// Derive the multisig address for given members and threshold
@@ -58,7 +58,7 @@ pub mod truly_self_initiating_multisig {
         Ok(vault_pda)
     }
 
-    /// Initialize a truly self-initiating multisig.
+    /// Initialize a self-initiating multisig.
     ///
     /// Members are passed via `remaining_accounts` (typically resolved from
     /// an Address Lookup Table the client set up beforehand) so they cost
@@ -73,7 +73,7 @@ pub mod truly_self_initiating_multisig {
     /// member set.
     ///
     /// SECURITY: each member signs a fixed-size init message off-chain
-    /// (`prefix || sha256(sorted_members) || threshold` — 67 bytes
+    /// (`prefix || sha256(sorted_members) || threshold` — 53 bytes
     /// regardless of N). The SDK packs all signatures into a single
     /// Ed25519 native-program instruction at index 0 of the same tx; we
     /// read it via the Instructions Sysvar, confirm it verified OUR init
@@ -1044,18 +1044,18 @@ fn compute_proposal_space(message: &TransactionMessage) -> usize {
 
 /// Create the fixed-size init message that members sign off-chain.
 ///
-/// Layout (67 bytes total, regardless of member count):
-///   [0..34]  domain separator b"TRULY_SELF_INITIATING_MULTISIG_INIT"
-///   [34..66] sha256(sorted_members concatenated raw bytes) — pins the
+/// Layout (53 bytes total, regardless of member count):
+///   [0..20]  domain separator b"SOLANA_MULTISIG_INIT"
+///   [20..52] sha256(sorted_members concatenated raw bytes) — pins the
 ///            signature to a specific member set
-///   [66]     threshold
+///   [52]     threshold
 ///
 /// Hashing the member list (rather than including each pubkey verbatim) is
 /// what lets the Ed25519 verify ix stay small enough that big multisigs fit
 /// inside Solana's 1232-byte transaction cap.
 fn create_initialization_message(members: &[Pubkey], threshold: u8) -> Vec<u8> {
-    let mut message = Vec::with_capacity(34 + 32 + 1);
-    message.extend_from_slice(b"TRULY_SELF_INITIATING_MULTISIG_INIT");
+    let mut message = Vec::with_capacity(20 + 32 + 1);
+    message.extend_from_slice(b"SOLANA_MULTISIG_INIT");
     message.extend_from_slice(&hash_members(members));
     message.push(threshold);
     message

@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
+import { SolanaMultisig } from "../target/types/solana_multisig";
 import {
   Keypair,
   PublicKey,
@@ -16,7 +16,7 @@ import * as nacl from "tweetnacl";
  * Tests all security guarantees and attempts various attacks.
  *
  * Init flow under test:
- *   1. Each member signs `prefix || sha256(sorted_members) || threshold` (67 bytes)
+ *   1. Each member signs `prefix || sha256(sorted_members) || threshold` (53 bytes)
  *   2. SDK packs all signatures into a single batched Ed25519 ix at tx index 0
  *   3. initialize_multisig harvests signers from that Ed25519 ix and validates
  *      threshold + member-set + dedup
@@ -25,8 +25,7 @@ describe("Security Testing", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace
-    .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+  const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 
   const ED25519_PROGRAM_ID = new PublicKey(
     "Ed25519SigVerify111111111111111111111111111"
@@ -75,7 +74,7 @@ describe("Security Testing", () => {
   }
   function buildInitMessage(ks: PublicKey[], t: number): Buffer {
     return Buffer.concat([
-      Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
+      Buffer.from("SOLANA_MULTISIG_INIT"),
       hashMembers(sortMembers(ks)),
       Buffer.from([t]),
     ]);

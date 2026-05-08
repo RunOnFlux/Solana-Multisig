@@ -35,9 +35,9 @@ import {
 } from "./utils";
 
 /**
- * Main SDK client for Truly Self-Initiating Multisig
+ * Main SDK client for the SSP Solana Multisig program.
  */
-export class TrulySelfInitiatingMultisigClient {
+export class SolanaMultisigClient {
   private connection: Connection;
   private program: Program;
   private programId: PublicKey;
@@ -55,7 +55,7 @@ export class TrulySelfInitiatingMultisigClient {
     );
 
     // Load program IDL
-    const idl = require("../../target/idl/truly_self_initiating_multisig.json");
+    const idl = require("../../target/idl/solana_multisig.json");
     this.program = new Program(idl, this.provider);
   }
 

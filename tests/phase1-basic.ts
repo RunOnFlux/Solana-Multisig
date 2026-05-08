@@ -1,16 +1,15 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
-import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
+import { SolanaMultisig } from "../target/types/solana_multisig";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { expect } from "chai";
 import * as crypto from "crypto";
 
-describe("Phase 1: Truly Self-Initiating Multisig", () => {
+describe("Phase 1: SSP Solana Multisig", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace
-    .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+  const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 
   let member1: Keypair;
   let member2: Keypair;

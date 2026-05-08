@@ -24,7 +24,7 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { TrulySelfInitiatingMultisigClient } from "../sdk/src";
+import { SolanaMultisigClient } from "../sdk/src";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const PROGRAM_ID = new PublicKey(
@@ -46,11 +46,7 @@ async function main() {
   );
   const deployer = Keypair.fromSecretKey(Uint8Array.from(deployerKey));
   const wallet = new anchor.Wallet(deployer);
-  const client = new TrulySelfInitiatingMultisigClient(
-    connection,
-    PROGRAM_ID,
-    wallet
-  );
+  const client = new SolanaMultisigClient(connection, PROGRAM_ID, wallet);
 
   log(`=== Devnet ${THRESHOLD}-of-${MEMBER_COUNT} smoke test ===`);
   log("Program:", PROGRAM_ID.toBase58());
@@ -60,7 +56,9 @@ async function main() {
   log("Deployer balance:", sol(startBalance), "SOL");
 
   // 1. Generate 10 fresh member keypairs
-  const members = Array.from({ length: MEMBER_COUNT }, () => Keypair.generate());
+  const members = Array.from({ length: MEMBER_COUNT }, () =>
+    Keypair.generate()
+  );
   const memberPubkeys = members.map((m) => m.publicKey);
   log(`\n[1] Generated ${MEMBER_COUNT} member keypairs`);
 
@@ -146,7 +144,10 @@ async function main() {
     [transferIx],
     members[0]
   );
-  log("\n[8] Proposal created at index", createResult.transactionIndex.toString());
+  log(
+    "\n[8] Proposal created at index",
+    createResult.transactionIndex.toString()
+  );
   log("    sig:", createResult.signature);
   log("    recipient:", recipient.publicKey.toBase58());
 

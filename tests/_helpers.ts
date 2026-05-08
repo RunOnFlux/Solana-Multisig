@@ -13,7 +13,7 @@ import {
 } from "@solana/web3.js";
 import * as crypto from "crypto";
 import * as nacl from "tweetnacl";
-import type { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
+import type { SolanaMultisig } from "../target/types/solana_multisig";
 
 /** Sort pubkeys by raw bytes — must match the program's `sort_members`. */
 export function sortMembers(members: PublicKey[]): PublicKey[] {
@@ -30,15 +30,15 @@ export function hashMembers(members: PublicKey[]): Buffer {
 }
 
 /**
- * Init message: prefix (34) || sha256(sorted_members) (32) || threshold (1)
- * = 67 bytes regardless of member count.
+ * Init message: prefix (20) || sha256(sorted_members) (32) || threshold (1)
+ * = 53 bytes regardless of member count.
  */
 export function buildInitMessage(
   members: PublicKey[],
   threshold: number
 ): Buffer {
   return Buffer.concat([
-    Buffer.from("TRULY_SELF_INITIATING_MULTISIG_INIT"),
+    Buffer.from("SOLANA_MULTISIG_INIT"),
     hashMembers(sortMembers(members)),
     Buffer.from([threshold]),
   ]);
@@ -185,7 +185,7 @@ export async function createMembersAlt(
  * fits ~5-6 members.
  */
 export async function sendInitTxViaAlt(opts: {
-  program: Program<TrulySelfInitiatingMultisig>;
+  program: Program<SolanaMultisig>;
   connection: Connection;
   multisig: PublicKey;
   members: PublicKey[];
@@ -254,7 +254,7 @@ export async function sendInitTxViaAlt(opts: {
  * 1232-byte tx cap. Pass `useAlt: true` to force the ALT path.
  */
 export async function setupMultisigViaAlt(opts: {
-  program: Program<TrulySelfInitiatingMultisig>;
+  program: Program<SolanaMultisig>;
   connection: Connection;
   members: Keypair[];
   threshold: number;

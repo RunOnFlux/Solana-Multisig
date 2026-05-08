@@ -11,7 +11,7 @@ import {
  * Domain separator for initialization messages
  * Must match the Rust implementation
  */
-export const INIT_MESSAGE_PREFIX = "TRULY_SELF_INITIATING_MULTISIG_INIT";
+export const INIT_MESSAGE_PREFIX = "SOLANA_MULTISIG_INIT";
 
 /**
  * Ed25519 Program ID (native Solana program)
@@ -103,10 +103,10 @@ export function deriveMultisigAddress(
 /**
  * Create the fixed-size init message that members sign off-chain.
  *
- * Layout (67 bytes total, regardless of member count):
- *   [0..34]   domain separator (`INIT_MESSAGE_PREFIX`)
- *   [34..66]  sha256(sorted_members concatenated raw bytes)
- *   [66]      threshold
+ * Layout (53 bytes total, regardless of member count):
+ *   [0..20]   domain separator (`INIT_MESSAGE_PREFIX`)
+ *   [20..52]  sha256(sorted_members concatenated raw bytes)
+ *   [52]      threshold
  *
  * Must byte-for-byte match the Rust `create_initialization_message`.
  */

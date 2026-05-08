@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
+import { SolanaMultisig } from "../target/types/solana_multisig";
 import { Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { expect } from "chai";
 import {
@@ -19,8 +19,7 @@ describe("Integration Tests", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace
-    .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+  const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 
   async function fundAccount(
     pubkey: PublicKey,
@@ -170,7 +169,7 @@ describe("Integration Tests", () => {
       const sig1 = createSignature(members, threshold, member1);
       const sig2 = createSignature(members, threshold, member2);
 
-      const tx = await submitInit({
+      await submitInit({
         members,
         sortedMembers: sortedMembers,
         threshold: threshold,
@@ -184,6 +183,8 @@ describe("Integration Tests", () => {
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
+      expect(multisigAccount.threshold).to.equal(threshold);
+      expect(multisigAccount.members.length).to.equal(3);
     });
   });
 
@@ -215,7 +216,7 @@ describe("Integration Tests", () => {
       const sig2 = createSignature(members, threshold, member2);
       const sig3 = createSignature(members, threshold, member3);
 
-      const tx = await submitInit({
+      await submitInit({
         members,
         sortedMembers: sortedMembers,
         threshold: threshold,
@@ -229,6 +230,8 @@ describe("Integration Tests", () => {
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
+      expect(multisigAccount.threshold).to.equal(threshold);
+      expect(multisigAccount.members.length).to.equal(3);
     });
   });
 
@@ -257,7 +260,7 @@ describe("Integration Tests", () => {
       const sig1 = createSignature(members, threshold, member1);
       const sig2 = createSignature(members, threshold, member2);
 
-      const tx = await submitInit({
+      await submitInit({
         members,
         sortedMembers,
         threshold,
@@ -272,6 +275,8 @@ describe("Integration Tests", () => {
       const multisigAccount = await program.account.multisig.fetch(
         multisigAddress
       );
+      expect(multisigAccount.threshold).to.equal(threshold);
+      expect(multisigAccount.members.length).to.equal(3);
     });
   });
 

@@ -1,8 +1,8 @@
-# Truly Self-Initiating Multisig
+# SSP Solana Multisig
 
-A Solana multisig program where the multisig address is **deterministically derived from members + threshold**. Anyone can derive the address before any on-chain action; anyone can pre-fund the vault; only threshold member signatures can initialize.
+A self-initiating Solana multisig program where the multisig address is **deterministically derived from members + threshold**. Anyone can derive the address before any on-chain action; anyone can pre-fund the vault; only threshold member signatures can initialize.
 
-Program ID: `F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo`
+Devnet Program ID: `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX`
 
 ## Why "self-initiating"
 
@@ -51,10 +51,10 @@ Users send funds TO the vault address. `SystemProgram::transfer` from the vault 
 ## Quick start
 
 ```typescript
-import { TrulySelfInitiatingMultisigClient, deriveVaultAddress } from "@truly-self-initiating/sdk";
+import { SolanaMultisigClient, deriveVaultAddress } from "@runonflux/solana-multisig";
 import { Connection, PublicKey, SystemProgram } from "@solana/web3.js";
 
-const client = new TrulySelfInitiatingMultisigClient(connection, programId);
+const client = new SolanaMultisigClient(connection, programId);
 
 // Derive addresses (free, off-chain)
 const multisig = client.deriveAddress(members, threshold);

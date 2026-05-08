@@ -1,5 +1,5 @@
 /**
- * Full lifecycle example for the Truly Self-Initiating Multisig.
+ * Full lifecycle example for the SSP Solana Multisig.
  *
  * Demonstrates the entire flow:
  *   1. Derive multisig + vault PDAs (off-chain, free)
@@ -31,8 +31,7 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import * as anchor from "@coral-xyz/anchor";
-import { TrulySelfInitiatingMultisigClient } from "../src";
+import { SolanaMultisigClient } from "../src";
 import { deriveVaultAddress } from "../src/utils";
 
 const PROGRAM_ID = new PublicKey(
@@ -43,7 +42,7 @@ const RPC_URL = "http://localhost:8899";
 
 async function main() {
   const connection = new Connection(RPC_URL, "confirmed");
-  const client = new TrulySelfInitiatingMultisigClient(connection, PROGRAM_ID);
+  const client = new SolanaMultisigClient(connection, PROGRAM_ID);
 
   // ========================================================================
   // 1. Members + addresses

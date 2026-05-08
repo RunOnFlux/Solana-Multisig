@@ -29,7 +29,7 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { TrulySelfInitiatingMultisigClient } from "../sdk/src";
+import { SolanaMultisigClient } from "../sdk/src";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const PROGRAM_ID = new PublicKey(
@@ -48,11 +48,7 @@ async function main() {
   );
   const deployer = Keypair.fromSecretKey(Uint8Array.from(deployerKey));
   const wallet = new anchor.Wallet(deployer);
-  const client = new TrulySelfInitiatingMultisigClient(
-    connection,
-    PROGRAM_ID,
-    wallet
-  );
+  const client = new SolanaMultisigClient(connection, PROGRAM_ID, wallet);
 
   log("=== Devnet SPL token smoke test ===");
   log("Program:", PROGRAM_ID.toBase58());
@@ -186,7 +182,10 @@ async function main() {
     message,
     members[0]
   );
-  log("\n[6] Proposal created at index", createResult.transactionIndex.toString());
+  log(
+    "\n[6] Proposal created at index",
+    createResult.transactionIndex.toString()
+  );
   log("    sig:", createResult.signature);
 
   // 8. Threshold approvals

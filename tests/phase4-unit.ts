@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
+import { SolanaMultisig } from "../target/types/solana_multisig";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { expect } from "chai";
 
@@ -12,8 +12,7 @@ describe("Unit Tests", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace
-    .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+  const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 
   describe("PDA Derivation Tests", () => {
     it("derives consistent addresses for same configuration", async () => {

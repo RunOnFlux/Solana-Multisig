@@ -18,7 +18,7 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { TrulySelfInitiatingMultisigClient } from "../sdk/src";
+import { SolanaMultisigClient } from "../sdk/src";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const PROGRAM_ID = new PublicKey(
@@ -37,11 +37,7 @@ async function main() {
   );
   const deployer = Keypair.fromSecretKey(Uint8Array.from(deployerKey));
   const wallet = new anchor.Wallet(deployer);
-  const client = new TrulySelfInitiatingMultisigClient(
-    connection,
-    PROGRAM_ID,
-    wallet
-  );
+  const client = new SolanaMultisigClient(connection, PROGRAM_ID, wallet);
 
   log("=== Devnet smoke test ===");
   log("Program:", PROGRAM_ID.toBase58());
@@ -133,7 +129,10 @@ async function main() {
     [transferIx],
     members[0]
   );
-  log("\n[8] Proposal created at index", createResult.transactionIndex.toString());
+  log(
+    "\n[8] Proposal created at index",
+    createResult.transactionIndex.toString()
+  );
   log("    sig:", createResult.signature);
   log("    recipient:", recipient.publicKey.toBase58());
 

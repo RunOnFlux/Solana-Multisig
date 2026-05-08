@@ -1,6 +1,6 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { TrulySelfInitiatingMultisig } from "../target/types/truly_self_initiating_multisig";
+import { SolanaMultisig } from "../target/types/solana_multisig";
 import {
   Keypair,
   PublicKey,
@@ -21,8 +21,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
-  const program = anchor.workspace
-    .TrulySelfInitiatingMultisig as Program<TrulySelfInitiatingMultisig>;
+  const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
   const programId = program.programId;
 
   // ============================================================

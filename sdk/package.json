@@ -1,7 +1,7 @@
 {
-  "name": "@truly-self-initiating/sdk",
+  "name": "@runonflux/solana-multisig",
   "version": "0.1.0",
-  "description": "TypeScript SDK for Truly Self-Initiating Multisig",
+  "description": "TypeScript SDK for SSP Solana Multisig",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {

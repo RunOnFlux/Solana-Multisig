@@ -26,8 +26,8 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-PROGRAM_ID="F8GiUeVDNuBQWUN5K6HzAzLbWKm2ZASGes4yxG7A6MFo"
-PROGRAM_SO="$ROOT/target/deploy/truly_self_initiating_multisig.so"
+PROGRAM_ID="CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX"
+PROGRAM_SO="$ROOT/target/deploy/solana_multisig.so"
 RPC_URL="http://127.0.0.1:8899"
 PHASE_FILTER="${1:-}"
 

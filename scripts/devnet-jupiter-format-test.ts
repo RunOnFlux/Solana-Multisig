@@ -29,7 +29,7 @@ import {
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
-import { TrulySelfInitiatingMultisigClient } from "../sdk/src";
+import { SolanaMultisigClient } from "../sdk/src";
 
 const DEVNET_RPC = "https://api.devnet.solana.com";
 const MAINNET_RPC = "https://api.mainnet-beta.solana.com";
@@ -80,11 +80,7 @@ async function main() {
   );
   const deployer = Keypair.fromSecretKey(Uint8Array.from(deployerKey));
   const wallet = new anchor.Wallet(deployer);
-  const client = new TrulySelfInitiatingMultisigClient(
-    devnetConn,
-    PROGRAM_ID,
-    wallet
-  );
+  const client = new SolanaMultisigClient(devnetConn, PROGRAM_ID, wallet);
 
   log("=== Devnet Jupiter compatibility test (format validation) ===");
   log("Program:", PROGRAM_ID.toBase58());
@@ -173,10 +169,7 @@ async function main() {
   log("    Cleanup ix:", swapIxData.cleanupInstruction ? 1 : 0);
   log("    Compute budget ixs:", swapIxData.computeBudgetInstructions.length);
   log("    ALTs referenced:", swapIxData.addressLookupTableAddresses.length);
-  log(
-    "    Swap ix accounts:",
-    swapIxData.swapInstruction.accounts.length
-  );
+  log("    Swap ix accounts:", swapIxData.swapInstruction.accounts.length);
   log(
     "    Swap ix data size:",
     Buffer.from(swapIxData.swapInstruction.data, "base64").length,
@@ -217,7 +210,10 @@ async function main() {
 
   // 5. Build a dedup'd unique-accounts list. Vault must be account_keys[0]
   //    per program invariant. Then all accounts referenced by any instruction.
-  const accountSet = new Map<string, { isSigner: boolean; isWritable: boolean }>();
+  const accountSet = new Map<
+    string,
+    { isSigner: boolean; isWritable: boolean }
+  >();
   // Force vault into slot 0
   accountSet.set(vaultPda.toBase58(), {
     isSigner: true,
@@ -247,20 +243,11 @@ async function main() {
     if (dataLen > maxIxData) maxIxData = dataLen;
   }
   log(`    Max ix data size: ${maxIxData} / ${MAX_IX_DATA_LEN} bytes`);
-  log(
-    "    Instruction count:",
-    proposalIxs.length,
-    "/",
-    MAX_INSTRUCTIONS
-  );
+  log("    Instruction count:", proposalIxs.length, "/", MAX_INSTRUCTIONS);
 
   if (accountSet.size > MAX_TX_ACCOUNT_KEYS) {
-    log(
-      "\n=== JUPITER FORMAT TEST: DOES NOT FIT ==="
-    );
-    log(
-      "The Jupiter swap exceeds MAX_TX_ACCOUNT_KEYS. Would need to either:"
-    );
+    log("\n=== JUPITER FORMAT TEST: DOES NOT FIT ===");
+    log("The Jupiter swap exceeds MAX_TX_ACCOUNT_KEYS. Would need to either:");
     log(" - Increase the limit (cost: more bytecode)");
     log(" - Or split the swap into multiple proposals");
     return;
@@ -342,14 +329,8 @@ async function main() {
     );
     log("    Proposal accepted on-chain ✓");
     log("    sig:", createResult.signature);
-    log(
-      "    proposal index:",
-      createResult.transactionIndex.toString()
-    );
-    log(
-      "    proposal address:",
-      createResult.transactionAddress.toBase58()
-    );
+    log("    proposal index:", createResult.transactionIndex.toString());
+    log("    proposal address:", createResult.transactionAddress.toBase58());
   } catch (err) {
     log("    Proposal REJECTED ✗");
     const errAny = err as { message?: string; transactionLogs?: string[] };
@@ -372,9 +353,7 @@ async function main() {
   log(
     "Execution path is not testable on devnet (Jupiter has no AMM liquidity there);"
   );
-  log(
-    "real end-to-end Jupiter swaps will be validated post-mainnet deploy."
-  );
+  log("real end-to-end Jupiter swaps will be validated post-mainnet deploy.");
 }
 
 main().catch((err) => {
