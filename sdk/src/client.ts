@@ -743,6 +743,35 @@ export class SolanaMultisigClient {
       .instruction();
   }
 
+  /**
+   * Build the `close_transaction` instruction (ix only).
+   *
+   * Closes an executed proposal account, refunding rent to the original
+   * creator. Typically bundled into the same outer tx as
+   * `execute_transaction` so close happens atomically with execute, dropping
+   * the per-send fee from ~0.0075 SOL to ~0.0002 SOL (the proposal rent
+   * cycles back to the creator instead of being permanently locked).
+   *
+   * Constraints:
+   *   - the proposal must already be executed (executed = true)
+   *   - the caller (creator) must match the proposal's stored creator
+   */
+  async buildCloseTransactionInstruction(opts: {
+    multisigAddress: PublicKey;
+    transactionAddress: PublicKey;
+    transactionIndex: bigint;
+    creator: PublicKey;
+  }): Promise<TransactionInstruction> {
+    return this.program.methods
+      .closeTransaction(new anchor.BN(opts.transactionIndex.toString()))
+      .accounts({
+        multisig: opts.multisigAddress,
+        transaction: opts.transactionAddress,
+        creator: opts.creator,
+      })
+      .instruction();
+  }
+
   // ==========================================================================
   // High-level helper for the SSP 2-of-2 single-tx send pattern.
   //

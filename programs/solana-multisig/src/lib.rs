@@ -607,6 +607,54 @@ pub mod solana_multisig {
 
         Ok(())
     }
+
+    /// Close an executed proposal account, refunding rent to the original
+    /// creator (the leaf member that paid for it at create_transaction time).
+    ///
+    /// This is garbage collection — the proposal account has done its job
+    /// (coordinated approvals, gated execution) and is now read-only state
+    /// no different from a successful transaction in the chain history.
+    /// Closing recovers the ~0.007 SOL rent that was locked when the account
+    /// was created. Without this, every multisig send would permanently
+    /// consume that rent on-chain.
+    ///
+    /// Constraints:
+    ///   - proposal must be executed (executed = true)
+    ///   - caller must be the original creator (matches transaction.creator)
+    ///   - rent refunds to creator
+    ///
+    /// Typically the wallet bundles `close_transaction` into the same outer
+    /// tx as `execute_transaction` so close happens atomically with execute,
+    /// keeping the per-send fee a single network-fee operation.
+    pub fn close_transaction(ctx: Context<CloseTransaction>, transaction_index: u64) -> Result<()> {
+        let multisig = &ctx.accounts.multisig;
+        let transaction = &ctx.accounts.transaction;
+
+        require_keys_eq!(
+            transaction.multisig,
+            multisig.key(),
+            ErrorCode::InvalidTransaction
+        );
+        require_eq!(
+            transaction.transaction_index,
+            transaction_index,
+            ErrorCode::InvalidTransactionIndex
+        );
+        require!(transaction.executed, ErrorCode::NotExecuted);
+        require_keys_eq!(
+            transaction.creator,
+            ctx.accounts.creator.key(),
+            ErrorCode::UnauthorizedCloser
+        );
+
+        msg!(
+            "✅ Transaction {} closed; rent refunded to creator {}",
+            transaction_index,
+            ctx.accounts.creator.key()
+        );
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -957,6 +1005,34 @@ pub struct ExecuteTransaction<'info> {
     pub executor: Signer<'info>,
 }
 
+#[derive(Accounts)]
+#[instruction(transaction_index: u64)]
+pub struct CloseTransaction<'info> {
+    /// Read-only reference — used only to derive the transaction PDA seeds.
+    pub multisig: Account<'info, Multisig>,
+
+    /// The proposal account being closed. Anchor's `close = creator` sweeps
+    /// the lamports (rent deposit) into the creator account and zeros the
+    /// account's data + discriminator, returning it to system-owned state.
+    #[account(
+        mut,
+        close = creator,
+        seeds = [
+            b"transaction",
+            multisig.key().as_ref(),
+            &transaction_index.to_le_bytes(),
+        ],
+        bump
+    )]
+    pub transaction: Account<'info, VaultTransaction>,
+
+    /// Must match the proposal's stored creator. Receives the rent refund.
+    /// Required as a Signer so a third party can't pre-emptively close
+    /// someone's executed proposal to grief them.
+    #[account(mut)]
+    pub creator: Signer<'info>,
+}
+
 // ============================================================================
 // Helper Functions - Phase 1 Core Logic
 // ============================================================================
@@ -1192,4 +1268,10 @@ pub enum ErrorCode {
 
     #[msg("Provided account does not match the static account_keys entry")]
     AccountMismatch,
+
+    #[msg("Cannot close transaction: not yet executed")]
+    NotExecuted,
+
+    #[msg("Only the original creator can close an executed transaction")]
+    UnauthorizedCloser,
 }

@@ -71,6 +71,100 @@
       ]
     },
     {
+      "name": "close_transaction",
+      "docs": [
+        "Close an executed proposal account, refunding rent to the original",
+        "creator (the leaf member that paid for it at create_transaction time).",
+        "",
+        "This is garbage collection — the proposal account has done its job",
+        "(coordinated approvals, gated execution) and is now read-only state",
+        "no different from a successful transaction in the chain history.",
+        "Closing recovers the ~0.007 SOL rent that was locked when the account",
+        "was created. Without this, every multisig send would permanently",
+        "consume that rent on-chain.",
+        "",
+        "Constraints:",
+        "- proposal must be executed (executed = true)",
+        "- caller must be the original creator (matches transaction.creator)",
+        "- rent refunds to creator",
+        "",
+        "Typically the wallet bundles `close_transaction` into the same outer",
+        "tx as `execute_transaction` so close happens atomically with execute,",
+        "keeping the per-send fee a single network-fee operation."
+      ],
+      "discriminator": [
+        97,
+        46,
+        152,
+        170,
+        42,
+        215,
+        192,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "multisig",
+          "docs": [
+            "Read-only reference — used only to derive the transaction PDA seeds."
+          ]
+        },
+        {
+          "name": "transaction",
+          "docs": [
+            "The proposal account being closed. Anchor's `close = creator` sweeps",
+            "the lamports (rent deposit) into the creator account and zeros the",
+            "account's data + discriminator, returning it to system-owned state."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  97,
+                  99,
+                  116,
+                  105,
+                  111,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "multisig"
+              },
+              {
+                "kind": "arg",
+                "path": "transaction_index"
+              }
+            ]
+          }
+        },
+        {
+          "name": "creator",
+          "docs": [
+            "Must match the proposal's stored creator. Receives the rent refund.",
+            "Required as a Signer so a third party can't pre-emptively close",
+            "someone's executed proposal to grief them."
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "transaction_index",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "create_transaction",
       "docs": [
         "Create a transaction proposal targeting a specific vault under the multisig.",
@@ -505,6 +599,16 @@
       "code": 6018,
       "name": "AccountMismatch",
       "msg": "Provided account does not match the static account_keys entry"
+    },
+    {
+      "code": 6019,
+      "name": "NotExecuted",
+      "msg": "Cannot close transaction: not yet executed"
+    },
+    {
+      "code": 6020,
+      "name": "UnauthorizedCloser",
+      "msg": "Only the original creator can close an executed transaction"
     }
   ],
   "types": [
