@@ -1065,8 +1065,17 @@ fn create_initialization_message(members: &[Pubkey], threshold: u8) -> Vec<u8> {
 // Constants
 // ============================================================================
 
-/// Maximum number of members in a multisig
-pub const MAX_MEMBERS: usize = 20;
+/// Maximum number of members in a multisig.
+///
+/// Bumped from 20 → 30 to support enterprise dual-signing-mode vaults
+/// where each SSP signer enrolls 2 ed25519 keys (wallet leaf + key leaf).
+/// At 30 members the program can hold 15 SSP signers in dual mode
+/// (15 × 2 = 30) while preserving the no-creator-key init flow.
+///
+/// The init-tx wire-budget ceiling of ~7 ed25519 signatures (single tx)
+/// is unchanged — the bump only enlarges the *member set capacity*, not
+/// the threshold. M ≤ 7 still applies for single-tx init.
+pub const MAX_MEMBERS: usize = 30;
 
 /// Maximum number of static account keys per transaction message.
 /// All accounts a proposal references must live here (proposals don't
@@ -1130,7 +1139,7 @@ pub enum ErrorCode {
     #[msg("Invalid threshold: must be > 0 and <= number of members")]
     InvalidThreshold,
 
-    #[msg("Too many members: maximum is 20")]
+    #[msg("Too many members: maximum is 30")]
     TooManyMembers,
 
     #[msg("Duplicate members not allowed")]

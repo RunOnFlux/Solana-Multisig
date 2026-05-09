@@ -99,7 +99,7 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 
 | Limit | Value | Rationale |
 |---|---|---|
-| `MAX_MEMBERS` | 20 | Practical for treasury governance |
+| `MAX_MEMBERS` | 30 | Treasury governance + enterprise dual-signing (2 ed25519 keys per SSP signer × 15 signers) |
 | `MAX_TX_ACCOUNT_KEYS` | 32 | Static account_keys per proposal |
 | `MAX_TX_INSTRUCTIONS` | 16 | Per proposal (CU-limited at execute) |
 | `MAX_INSTRUCTION_ACCOUNTS` | 64 | Per instruction (1-byte indexes) |
@@ -107,6 +107,31 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 | `MAX_ADDRESS_TABLE_LOOKUPS` | 4 | ALTs per proposal |
 | `MAX_INDEXES_PER_LOOKUP` | 28 | Each (writable + readonly) per ALT |
 | `MAX_COMBINED_ACCOUNTS` | 256 | Solana's u8 index space cap |
+
+### Init-time threshold ceiling
+
+While the program *stores* up to `MAX_MEMBERS = 20` members, **single-tx
+initialization fits at most ~7 signatures** under Solana's 1232-byte tx cap.
+Each ed25519 init signature contributes 64 (sig) + 32 (pubkey) + 14 (offset
+metadata) = 110 bytes that cannot be ALT-compressed (signatures are payload,
+not account references).
+
+| Configuration | Init tx fits? |
+|---|---|
+| Any `M-of-N` with `M ≤ 7` and `N ≤ 30` | ✅ |
+| `M ≥ 8` (e.g. 8-of-15, 15-of-15, 20-of-20) | ❌ overflows 1232-byte cap |
+
+**This covers the practical majority of multisig configurations** — 2-of-3,
+3-of-5, 4-of-7, 5-of-9, 7-of-10 all fit. Larger thresholds (8-of-N and
+above) are uncommon in real-world treasury governance but are blocked by
+this design today.
+
+If support requests for `M ≥ 8` materialize, see
+[`docs/BATCHED_INIT_SCOPE.md`](docs/BATCHED_INIT_SCOPE.md) for a prepared
+scope plan that lifts the ceiling via a multi-tx batched init flow without
+compromising the no-creator-key security property. Estimated effort: ~4
+days, fully reversible (existing single-tx init path is preserved for
+`M ≤ 7`).
 
 ## Build + test
 

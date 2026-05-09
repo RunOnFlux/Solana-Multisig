@@ -419,7 +419,7 @@
     {
       "code": 6001,
       "name": "TooManyMembers",
-      "msg": "Too many members: maximum is 20"
+      "msg": "Too many members: maximum is 30"
     },
     {
       "code": 6002,

@@ -215,19 +215,19 @@ describe("Unit Tests", () => {
       console.log(`✅ 2-member multisig supported`);
     });
 
-    it("should support maximum members (20)", async () => {
+    it("should support maximum members (30)", async () => {
       const members = Array.from(
-        { length: 20 },
+        { length: 30 },
         () => Keypair.generate().publicKey
       );
       const sorted = [...members].sort((a, b) =>
         Buffer.compare(a.toBuffer(), b.toBuffer())
       );
 
-      const address = await program.methods.deriveAddress(sorted, 8).view();
+      const address = await program.methods.deriveAddress(sorted, 7).view();
 
       expect(address).to.be.instanceOf(PublicKey);
-      console.log(`✅ 20-member multisig supported`);
+      console.log(`✅ 30-member multisig supported (max enrolled members)`);
     });
 
     it("should support 8-of-15 multisig", async () => {
