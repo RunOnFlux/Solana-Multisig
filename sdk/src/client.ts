@@ -12,7 +12,7 @@ import {
   SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import * as anchor from "@coral-xyz/anchor";
-import { Program, AnchorProvider, Wallet } from "@coral-xyz/anchor";
+import { Program, AnchorProvider } from "@coral-xyz/anchor";
 import {
   SignatureData,
   InitializeResult,
@@ -33,6 +33,22 @@ import {
   createBatchedEd25519Instruction,
   buildMessageFromInstructions,
 } from "./utils";
+
+/**
+ * Anchor's `Wallet` interface — duplicated locally so the SDK doesn't take a
+ * top-level reference to anchor's `Wallet` class. Some bundlers (notably
+ * Vite for browser builds) tree-shake `Wallet` away, which used to make the
+ * SDK constructor throw "Wallet is not a constructor" at runtime when no
+ * wallet was passed. By accepting a structurally-typed wallet here and
+ * defaulting to an inline read-only stub, consumers who only use the SDK
+ * for queries + ix building never need to import `Wallet` at all.
+ */
+export interface AnchorWalletLike {
+  publicKey: PublicKey;
+  signTransaction<T>(tx: T): Promise<T>;
+  signAllTransactions<T>(txs: T[]): Promise<T[]>;
+  payer?: Keypair;
+}
 
 /**
  * Bump the BorshInstructionCoder's scratch buffer past Anchor's hardcoded
@@ -89,14 +105,30 @@ export class SolanaMultisigClient {
   private programId: PublicKey;
   private provider: AnchorProvider;
 
-  constructor(connection: Connection, programId: PublicKey, wallet?: Wallet) {
+  constructor(
+    connection: Connection,
+    programId: PublicKey,
+    wallet?: AnchorWalletLike
+  ) {
     this.connection = connection;
     this.programId = programId;
 
-    // Create provider
+    // Default to a no-op read-only wallet — the SDK only signs via explicit
+    // helpers callers pass keypairs to (see e.g. `initialize`,
+    // `createTransaction`); the AnchorProvider's wallet is never asked to
+    // sign anything from inside the SDK. Inlining a stub here (instead of
+    // `new Wallet(...)` from anchor) means bundlers don't need to keep
+    // anchor's `Wallet` class reachable.
+    const stubKeypair = Keypair.generate();
+    const readonlyWallet: AnchorWalletLike = wallet ?? {
+      publicKey: stubKeypair.publicKey,
+      payer: stubKeypair,
+      signTransaction: <T>(tx: T): Promise<T> => Promise.resolve(tx),
+      signAllTransactions: <T>(txs: T[]): Promise<T[]> => Promise.resolve(txs),
+    };
     this.provider = new AnchorProvider(
       connection,
-      wallet || new Wallet(Keypair.generate()),
+      readonlyWallet as never,
       { commitment: "confirmed" }
     );
 
