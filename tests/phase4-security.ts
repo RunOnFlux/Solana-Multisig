@@ -189,7 +189,7 @@ describe("Security Testing", () => {
       let threw = false;
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({
             multisig,
             payer: attacker.publicKey,
@@ -228,7 +228,7 @@ describe("Security Testing", () => {
       let threw = false;
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({
             multisig,
             payer: attacker.publicKey,
@@ -269,7 +269,7 @@ describe("Security Testing", () => {
       let threw = false;
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({
             multisig,
             payer: member1.publicKey,
@@ -312,7 +312,7 @@ describe("Security Testing", () => {
       let threw = false;
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({
             multisig,
             payer: member1.publicKey,
@@ -348,7 +348,7 @@ describe("Security Testing", () => {
       let threw = false;
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({ multisig, payer: member1.publicKey })
           .remainingAccounts(
             sortedMembers.map((pubkey) => ({
@@ -410,7 +410,8 @@ describe("Security Testing", () => {
         await program.methods
           .initializeMultisig(
             Array.from(hashMembers(originalSorted)),
-            threshold
+            threshold,
+            originalSorted.length
           )
           .accountsPartial({
             multisig: originalMultisig,
@@ -454,7 +455,7 @@ describe("Security Testing", () => {
       // First init may succeed or may already exist from a previous test run.
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({
             multisig,
             payer: member1.publicKey,
@@ -478,7 +479,7 @@ describe("Security Testing", () => {
       let threw = false;
       try {
         await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold)
+          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
           .accountsPartial({
             multisig,
             payer: member1.publicKey,

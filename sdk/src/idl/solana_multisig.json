@@ -450,6 +450,12 @@
       "accounts": [
         {
           "name": "multisig",
+          "docs": [
+            "Sized to the *actual* member count (4 + N×32 bytes for the members",
+            "vec, vs. 4 + 30×32 if we always allocated MAX_MEMBERS). The handler",
+            "verifies `member_count == remaining_accounts.len()` to prevent the",
+            "allocation from being smaller than the data we then write."
+          ],
           "writable": true
         },
         {
@@ -481,6 +487,10 @@
         },
         {
           "name": "threshold",
+          "type": "u8"
+        },
+        {
+          "name": "member_count",
           "type": "u8"
         }
       ]
@@ -619,6 +629,11 @@
       "code": 6020,
       "name": "UnauthorizedCloser",
       "msg": "Only the original payer can close an executed transaction"
+    },
+    {
+      "code": 6021,
+      "name": "InvalidMemberCount",
+      "msg": "Member count argument does not match the provided members list"
     }
   ],
   "types": [

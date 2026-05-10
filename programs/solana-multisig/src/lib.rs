@@ -85,11 +85,21 @@ pub mod solana_multisig {
         ctx: Context<'_, '_, '_, 'info, InitializeMultisig<'info>>,
         member_hash: [u8; 32],
         threshold: u8,
+        member_count: u8,
     ) -> Result<()> {
         // Harvest members from remaining_accounts. The client typically
         // sources these from an ALT, but the program doesn't care — they
         // can also be passed as static accounts.
         let members: Vec<Pubkey> = ctx.remaining_accounts.iter().map(|a| a.key()).collect();
+
+        // member_count is an instruction arg so the `init` constraint can
+        // size the account exactly (instead of always allocating MAX_MEMBERS
+        // bytes). Verify the client-supplied count matches reality — a
+        // mismatch would mean the account allocation doesn't fit the data.
+        require!(
+            members.len() == member_count as usize,
+            ErrorCode::InvalidMemberCount
+        );
 
         require!(
             threshold > 0 && threshold <= members.len() as u8,
@@ -899,12 +909,16 @@ pub struct DeriveAddress<'info> {
 }
 
 #[derive(Accounts)]
-#[instruction(member_hash: [u8; 32], threshold: u8)]
+#[instruction(member_hash: [u8; 32], threshold: u8, member_count: u8)]
 pub struct InitializeMultisig<'info> {
+    /// Sized to the *actual* member count (4 + N×32 bytes for the members
+    /// vec, vs. 4 + 30×32 if we always allocated MAX_MEMBERS). The handler
+    /// verifies `member_count == remaining_accounts.len()` to prevent the
+    /// allocation from being smaller than the data we then write.
     #[account(
         init,
         payer = payer,
-        space = 8 + Multisig::INIT_SPACE,
+        space = compute_multisig_space(member_count as usize),
         seeds = [
             b"multisig",
             member_hash.as_ref(),
@@ -1085,6 +1099,23 @@ fn hash_members(members: &[Pubkey]) -> [u8; 32] {
         data.extend_from_slice(member.as_ref());
     }
     hash(&data).to_bytes()
+}
+
+/// Compute the exact bytes a `Multisig` account needs to hold N members.
+/// Anchor's `init` constraint reads this so the allocation matches reality
+/// instead of always reserving `MAX_MEMBERS=30` slots. A 2-of-2 consumer
+/// multisig drops from 982 bytes to 86 bytes — multisig PDA rent falls
+/// from ~0.0077 SOL to ~0.003 SOL.
+///
+/// The Multisig struct never grows after init (members + threshold are
+/// immutable; transaction_index increments in place; bump is fixed), so
+/// sizing exactly is safe.
+fn compute_multisig_space(member_count: usize) -> usize {
+    8                          // anchor discriminator
+    + 4 + member_count * 32    // members (Vec<Pubkey>, exact length)
+    + 1                        // threshold
+    + 8                        // transaction_index
+    + 1                        // bump
 }
 
 /// Compute the exact bytes a `VaultTransaction` account needs to hold a
@@ -1278,4 +1309,7 @@ pub enum ErrorCode {
 
     #[msg("Only the original payer can close an executed transaction")]
     UnauthorizedCloser,
+
+    #[msg("Member count argument does not match the provided members list")]
+    InvalidMemberCount,
 }

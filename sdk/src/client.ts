@@ -35,6 +35,52 @@ import {
 } from "./utils";
 
 /**
+ * Bump the BorshInstructionCoder's scratch buffer past Anchor's hardcoded
+ * 1000-byte allocation (see node_modules/@coral-xyz/anchor/.../coder/borsh/instruction.js
+ * — there's a TODO comment from the anchor maintainers about this).
+ *
+ * For our `create_transaction` ix, message data + many account_keys can
+ * exceed 1000 bytes, throwing "encoding overruns Buffer" client-side.
+ * Solana's tx-size cap is 1232 bytes total, so 2000 bytes for ix args is
+ * safely above any valid input.
+ *
+ * The patch matches anchor's encode shape: 8-byte sighash discriminator
+ * followed by borsh-encoded args. Sighash for global ix `<name>` is
+ * `sha256("global:<name>")[..8]`.
+ */
+function patchIxEncoderBufferSize(program: Program, size: number): void {
+  try {
+    const ixCoder = (program.coder.instruction as unknown) as {
+      ixLayouts?: Map<
+        string,
+        {
+          discriminator: number[];
+          layout: { encode: (data: unknown, b: Buffer) => number };
+        }
+      >;
+      encode?: (ixName: string, data: unknown) => Buffer;
+    };
+    const layouts = ixCoder.ixLayouts;
+    if (!ixCoder.encode || !layouts) return;
+
+    ixCoder.encode = (ixName: string, data: unknown): Buffer => {
+      const entry = layouts.get(ixName);
+      if (!entry) {
+        throw new Error(`Unknown instruction: ${ixName}`);
+      }
+      const buffer = Buffer.alloc(size);
+      const len = entry.layout.encode(data, buffer);
+      return Buffer.concat([
+        Buffer.from(entry.discriminator),
+        buffer.subarray(0, len),
+      ]);
+    };
+  } catch {
+    // best effort — fall through to anchor's default 1000-byte cap
+  }
+}
+
+/**
  * Main SDK client for the SSP Solana Multisig program.
  */
 export class SolanaMultisigClient {
@@ -57,6 +103,15 @@ export class SolanaMultisigClient {
     // Load program IDL (bundled in the SDK)
     const idl = require("./idl/solana_multisig.json");
     this.program = new Program(idl, this.provider);
+
+    // Anchor's BorshInstructionCoder pre-allocates a 1000-byte scratch
+    // buffer for ix args (see node_modules/@coral-xyz/anchor/.../coder/borsh/instruction.js).
+    // For create_transaction with many account_keys + a fat ix data field
+    // (e.g. a real Jupiter swap), 1000 bytes overruns. Solana's tx-size
+    // limit is 1232 bytes for the FULL tx — args alone can practically
+    // hit ~1100. Bump the scratch buffer to 2000 to safely cover any
+    // valid create_transaction proposal.
+    patchIxEncoderBufferSize(this.program, 2000);
   }
 
   /**
@@ -266,7 +321,11 @@ export class SolanaMultisigClient {
     const ed25519Ix = createBatchedEd25519Instruction(signatures, message);
 
     const initializeIx = await this.program.methods
-      .initializeMultisig(Array.from(memberHash), threshold)
+      .initializeMultisig(
+        Array.from(memberHash),
+        threshold,
+        sortedMembers.length
+      )
       .accounts({
         multisig: multisigAddress,
         payer: payer.publicKey,
@@ -630,7 +689,11 @@ export class SolanaMultisigClient {
     );
     const memberHash = hashMembers(sortedMembers);
     const instruction = await this.program.methods
-      .initializeMultisig(Array.from(memberHash), opts.threshold)
+      .initializeMultisig(
+        Array.from(memberHash),
+        opts.threshold,
+        sortedMembers.length
+      )
       .accounts({
         multisig: multisigAddress,
         payer: opts.payer,

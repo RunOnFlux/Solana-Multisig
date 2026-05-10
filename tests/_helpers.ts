@@ -201,7 +201,11 @@ export async function sendInitTxViaAlt(opts: {
   const ed25519Ix = makeBatchedEd25519Ix(opts.sigs, message);
 
   const initIx = await opts.program.methods
-    .initializeMultisig(Array.from(memberHash), opts.threshold)
+    .initializeMultisig(
+      Array.from(memberHash),
+      opts.threshold,
+      sortedMembers.length
+    )
     .accountsPartial({
       multisig: opts.multisig,
       payer: opts.payer.publicKey,
