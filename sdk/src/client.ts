@@ -386,7 +386,8 @@ export class SolanaMultisigClient {
     multisigAddress: PublicKey,
     vaultIndex: number,
     instructions: TransactionInstruction[],
-    creator: Keypair
+    creator: Keypair,
+    payer?: Keypair
   ): Promise<CreateTransactionResult> {
     const vaultPda = this.deriveVaultAddress(multisigAddress, vaultIndex);
     const message = buildMessageFromInstructions(vaultPda, instructions);
@@ -394,7 +395,8 @@ export class SolanaMultisigClient {
       multisigAddress,
       vaultIndex,
       message,
-      creator
+      creator,
+      payer
     );
   }
 
@@ -409,7 +411,8 @@ export class SolanaMultisigClient {
     multisigAddress: PublicKey,
     vaultIndex: number,
     message: TransactionMessage,
-    creator: Keypair
+    creator: Keypair,
+    payer?: Keypair
   ): Promise<CreateTransactionResult> {
     const multisig = await this.getMultisig(multisigAddress);
     if (!multisig) {
@@ -426,8 +429,6 @@ export class SolanaMultisigClient {
       this.programId
     );
 
-    // Convert message to the on-chain Anchor encoding (numeric arrays for
-    // Vec<u8> fields, plain pubkeys for Vec<Pubkey>).
     const onchainMessage = {
       numSigners: message.numSigners,
       numWritableSigners: message.numWritableSigners,
@@ -445,15 +446,21 @@ export class SolanaMultisigClient {
       })),
     };
 
+    const rentPayer = payer ?? creator;
+    const signers = rentPayer.publicKey.equals(creator.publicKey)
+      ? [creator]
+      : [creator, rentPayer];
+
     const tx = await this.program.methods
       .createTransaction(vaultIndex, onchainMessage)
       .accounts({
         multisig: multisigAddress,
         transaction: transactionAddress,
         creator: creator.publicKey,
+        payer: rentPayer.publicKey,
         systemProgram: SystemProgram.programId,
       })
-      .signers([creator])
+      .signers(signers)
       .rpc();
 
     return {
@@ -654,6 +661,13 @@ export class SolanaMultisigClient {
     vaultIndex: number;
     message: TransactionMessage;
     creator: PublicKey;
+    /**
+     * Account that funds the proposal account's rent and receives the refund
+     * on `close_transaction`. Decoupled from `creator` so a paymaster can pay
+     * rent while a multisig member authorizes. Defaults to `creator` for
+     * backwards-compatible standalone usage.
+     */
+    payer?: PublicKey;
   }): Promise<{
     instruction: TransactionInstruction;
     transactionAddress: PublicKey;
@@ -688,6 +702,7 @@ export class SolanaMultisigClient {
         multisig: opts.multisigAddress,
         transaction: transactionAddress,
         creator: opts.creator,
+        payer: opts.payer ?? opts.creator,
         systemProgram: SystemProgram.programId,
       })
       .instruction();
@@ -746,28 +761,26 @@ export class SolanaMultisigClient {
   /**
    * Build the `close_transaction` instruction (ix only).
    *
-   * Closes an executed proposal account, refunding rent to the original
-   * creator. Typically bundled into the same outer tx as
-   * `execute_transaction` so close happens atomically with execute, dropping
-   * the per-send fee from ~0.0075 SOL to ~0.0002 SOL (the proposal rent
-   * cycles back to the creator instead of being permanently locked).
+   * Closes an executed proposal, refunding the rent deposit to the account
+   * that originally funded it (`transaction.payer`). Typically bundled into
+   * the same outer tx as `execute_transaction` so close happens atomically.
    *
    * Constraints:
    *   - the proposal must already be executed (executed = true)
-   *   - the caller (creator) must match the proposal's stored creator
+   *   - `payer` must match the proposal's stored payer (signs as refund target)
    */
   async buildCloseTransactionInstruction(opts: {
     multisigAddress: PublicKey;
     transactionAddress: PublicKey;
     transactionIndex: bigint;
-    creator: PublicKey;
+    payer: PublicKey;
   }): Promise<TransactionInstruction> {
     return this.program.methods
       .closeTransaction(new anchor.BN(opts.transactionIndex.toString()))
       .accounts({
         multisig: opts.multisigAddress,
         transaction: opts.transactionAddress,
-        creator: opts.creator,
+        payer: opts.payer,
       })
       .instruction();
   }

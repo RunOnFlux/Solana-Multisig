@@ -326,6 +326,7 @@ pub mod solana_multisig {
         transaction.multisig = multisig_key;
         transaction.transaction_index = new_index;
         transaction.creator = creator_key;
+        transaction.payer = ctx.accounts.payer.key();
         transaction.bump = ctx.bumps.transaction;
         transaction.vault_index = vault_index;
         transaction.vault_bump = vault_bump;
@@ -608,24 +609,18 @@ pub mod solana_multisig {
         Ok(())
     }
 
-    /// Close an executed proposal account, refunding rent to the original
-    /// creator (the leaf member that paid for it at create_transaction time).
+    /// Close an executed proposal account, refunding rent to the account that
+    /// originally funded it (`transaction.payer`).
     ///
-    /// This is garbage collection — the proposal account has done its job
-    /// (coordinated approvals, gated execution) and is now read-only state
-    /// no different from a successful transaction in the chain history.
-    /// Closing recovers the ~0.007 SOL rent that was locked when the account
-    /// was created. Without this, every multisig send would permanently
-    /// consume that rent on-chain.
+    /// Garbage collection: the proposal has done its job (coordinated
+    /// approvals, gated execution) and is read-only history afterwards. Closing
+    /// recovers the ~0.007 SOL rent. Wallets typically bundle this into the
+    /// same outer tx as `execute_transaction` so close is atomic with execute.
     ///
-    /// Constraints:
+    /// Constraints (most enforced via Anchor account constraints):
     ///   - proposal must be executed (executed = true)
-    ///   - caller must be the original creator (matches transaction.creator)
-    ///   - rent refunds to creator
-    ///
-    /// Typically the wallet bundles `close_transaction` into the same outer
-    /// tx as `execute_transaction` so close happens atomically with execute,
-    /// keeping the per-send fee a single network-fee operation.
+    ///   - signer must equal stored `transaction.payer` (has_one)
+    ///   - rent refunds to payer (close = payer)
     pub fn close_transaction(ctx: Context<CloseTransaction>, transaction_index: u64) -> Result<()> {
         let multisig = &ctx.accounts.multisig;
         let transaction = &ctx.accounts.transaction;
@@ -641,16 +636,11 @@ pub mod solana_multisig {
             ErrorCode::InvalidTransactionIndex
         );
         require!(transaction.executed, ErrorCode::NotExecuted);
-        require_keys_eq!(
-            transaction.creator,
-            ctx.accounts.creator.key(),
-            ErrorCode::UnauthorizedCloser
-        );
 
         msg!(
-            "✅ Transaction {} closed; rent refunded to creator {}",
+            "✅ Transaction {} closed; rent refunded to payer {}",
             transaction_index,
-            ctx.accounts.creator.key()
+            ctx.accounts.payer.key()
         );
 
         Ok(())
@@ -797,8 +787,13 @@ pub struct VaultTransaction {
     /// Transaction index (matches multisig.transaction_index counter at create time).
     pub transaction_index: u64,
 
-    /// Member who created the proposal.
+    /// Member who created the proposal (authorizer; NOT the rent funder).
     pub creator: Pubkey,
+
+    /// Account that funded the proposal's rent at create time. `close_transaction`
+    /// refunds rent here. Decoupled from `creator` so a paymaster can pay rent
+    /// while a leaf member authorizes.
+    pub payer: Pubkey,
 
     /// PDA bump.
     pub bump: u8,
@@ -939,11 +934,9 @@ pub struct CreateTransaction<'info> {
     /// Sized to the *actual* bytes this specific proposal needs, not the
     /// MAX_* upper bounds. Avoids the 10240-byte System-Program CPI realloc
     /// cap that `init` hits when allocating worst-case-sized accounts.
-    /// Proposals whose computed size exceeds `MAX_PROPOSAL_ACCOUNT_BYTES`
-    /// will fail at `init` with the runtime's realloc error.
     #[account(
         init,
-        payer = creator,
+        payer = payer,
         space = compute_proposal_space(&message),
         seeds = [
             b"transaction",
@@ -954,8 +947,16 @@ pub struct CreateTransaction<'info> {
     )]
     pub transaction: Account<'info, VaultTransaction>,
 
-    #[account(mut)]
+    /// Multisig member authorizing the proposal. Verified against the member
+    /// set inside the handler. Does NOT pay rent — that's `payer`.
     pub creator: Signer<'info>,
+
+    /// Funds the proposal account's rent. Decoupled from `creator` so the
+    /// SSP relay paymaster can underwrite proposal storage without each
+    /// member's leaf needing a SOL balance. Stored on the proposal so
+    /// `close_transaction` refunds rent back to this same account.
+    #[account(mut)]
+    pub payer: Signer<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -1011,12 +1012,14 @@ pub struct CloseTransaction<'info> {
     /// Read-only reference — used only to derive the transaction PDA seeds.
     pub multisig: Account<'info, Multisig>,
 
-    /// The proposal account being closed. Anchor's `close = creator` sweeps
-    /// the lamports (rent deposit) into the creator account and zeros the
-    /// account's data + discriminator, returning it to system-owned state.
+    /// The proposal account being closed. Anchor's `close = payer` sweeps the
+    /// rent deposit into the payer account and zeros the data + discriminator,
+    /// returning it to system-owned state. `has_one = payer` enforces that
+    /// the signer matches the account that originally funded the rent.
     #[account(
         mut,
-        close = creator,
+        close = payer,
+        has_one = payer @ ErrorCode::UnauthorizedCloser,
         seeds = [
             b"transaction",
             multisig.key().as_ref(),
@@ -1026,11 +1029,11 @@ pub struct CloseTransaction<'info> {
     )]
     pub transaction: Account<'info, VaultTransaction>,
 
-    /// Must match the proposal's stored creator. Receives the rent refund.
-    /// Required as a Signer so a third party can't pre-emptively close
-    /// someone's executed proposal to grief them.
+    /// Receives the rent refund. Must match the proposal's stored `payer`.
+    /// Signer requirement prevents a third party from closing someone else's
+    /// proposal to grief them.
     #[account(mut)]
-    pub creator: Signer<'info>,
+    pub payer: Signer<'info>,
 }
 
 // ============================================================================
@@ -1099,6 +1102,7 @@ fn compute_proposal_space(message: &TransactionMessage) -> usize {
     + 32                                    // multisig
     + 8                                     // transaction_index
     + 32                                    // creator
+    + 32                                    // payer
     + 1                                     // bump
     + 1                                     // vault_index
     + 1                                     // vault_bump
@@ -1272,6 +1276,6 @@ pub enum ErrorCode {
     #[msg("Cannot close transaction: not yet executed")]
     NotExecuted,
 
-    #[msg("Only the original creator can close an executed transaction")]
+    #[msg("Only the original payer can close an executed transaction")]
     UnauthorizedCloser,
 }

@@ -176,17 +176,20 @@ async function main() {
     addressTableLookups: [],
   };
 
+  // payer = deployer exercises the payer ≠ creator decoupling.
   const createResult = await client.createTransactionFromMessage(
     multisigAddress,
     0,
     message,
-    members[0]
+    members[0],
+    deployer
   );
   log(
     "\n[6] Proposal created at index",
     createResult.transactionIndex.toString()
   );
   log("    sig:", createResult.signature);
+  log("    creator: members[0] | payer:", deployer.publicKey.toBase58());
 
   // 8. Threshold approvals
   log("\n[7] Collecting approvals...");

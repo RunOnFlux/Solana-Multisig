@@ -12,12 +12,13 @@ import { setupMultisigViaAlt } from "./_helpers";
 
 /**
  * Phase 7: close_transaction — garbage-collect executed proposal accounts
- * and refund their rent to the original creator.
+ * and refund their rent to the original payer.
  *
  * Without this instruction, every multisig send leaves a small (~0.007 SOL)
  * permanent rent deposit on-chain forever. With it, the wallet bundles
  * close_transaction into the same outer tx as execute_transaction and the
- * rent cycles back into the creator's leaf, keeping per-send fees minimal.
+ * rent cycles back to the payer (typically the SSP relay paymaster in
+ * production), keeping per-send fees minimal.
  */
 describe("Phase 7: close_transaction", () => {
   const provider = anchor.AnchorProvider.env();
@@ -143,6 +144,7 @@ describe("Phase 7: close_transaction", () => {
         multisig: opts.multisig,
         transaction: pda,
         creator: opts.members[0].publicKey,
+        payer: opts.members[0].publicKey,
         systemProgram: SystemProgram.programId,
       })
       .signers([opts.members[0]])
@@ -179,7 +181,7 @@ describe("Phase 7: close_transaction", () => {
     return { pda, index, recipient };
   }
 
-  it("closes an executed proposal and refunds rent to the creator", async () => {
+  it("closes an executed proposal and refunds rent to the payer", async () => {
     const { members, multisig, vault } = await setupMultisig({
       memberCount: 3,
       threshold: 2,
@@ -207,16 +209,16 @@ describe("Phase 7: close_transaction", () => {
       .accountsPartial({
         multisig,
         transaction: pda,
-        creator: members[0].publicKey,
+        payer: members[0].publicKey,
       })
       .signers([members[0]])
       .rpc();
 
-    // Account is closed (sweeped to creator).
+    // Account is closed (sweeped to payer).
     const accAfter = await provider.connection.getAccountInfo(pda);
     expect(accAfter).to.be.null;
 
-    // Creator's balance increased by ~rentLocked (minus tiny tx fee).
+    // Payer's balance increased by ~rentLocked (minus tiny tx fee).
     const balAfter = await provider.connection.getBalance(members[0].publicKey);
     expect(balAfter - balBefore).to.be.greaterThan(rentLocked - 100_000);
   });
@@ -240,6 +242,7 @@ describe("Phase 7: close_transaction", () => {
         multisig,
         transaction: pda,
         creator: members[0].publicKey,
+        payer: members[0].publicKey,
         systemProgram: SystemProgram.programId,
       })
       .signers([members[0]])
@@ -252,7 +255,7 @@ describe("Phase 7: close_transaction", () => {
         .accountsPartial({
           multisig,
           transaction: pda,
-          creator: members[0].publicKey,
+          payer: members[0].publicKey,
         })
         .signers([members[0]])
         .rpc();
@@ -263,7 +266,7 @@ describe("Phase 7: close_transaction", () => {
     expect(threw).to.equal(true);
   });
 
-  it("rejects close by a non-creator member", async () => {
+  it("rejects close by an account that is not the original payer", async () => {
     const { members, multisig, vault } = await setupMultisig({
       memberCount: 3,
       threshold: 2,
@@ -283,13 +286,15 @@ describe("Phase 7: close_transaction", () => {
         .accountsPartial({
           multisig,
           transaction: pda,
-          creator: members[1].publicKey, // not the original creator
+          payer: members[1].publicKey, // not the original payer
         })
         .signers([members[1]])
         .rpc();
     } catch (e) {
       threw = true;
-      expect(String(e)).to.match(/UnauthorizedCloser|original creator/i);
+      expect(String(e)).to.match(
+        /UnauthorizedCloser|original payer|ConstraintHasOne/i
+      );
     }
     expect(threw).to.equal(true);
   });

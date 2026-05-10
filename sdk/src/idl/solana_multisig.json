@@ -73,24 +73,18 @@
     {
       "name": "close_transaction",
       "docs": [
-        "Close an executed proposal account, refunding rent to the original",
-        "creator (the leaf member that paid for it at create_transaction time).",
+        "Close an executed proposal account, refunding rent to the account that",
+        "originally funded it (`transaction.payer`).",
         "",
-        "This is garbage collection — the proposal account has done its job",
-        "(coordinated approvals, gated execution) and is now read-only state",
-        "no different from a successful transaction in the chain history.",
-        "Closing recovers the ~0.007 SOL rent that was locked when the account",
-        "was created. Without this, every multisig send would permanently",
-        "consume that rent on-chain.",
+        "Garbage collection: the proposal has done its job (coordinated",
+        "approvals, gated execution) and is read-only history afterwards. Closing",
+        "recovers the ~0.007 SOL rent. Wallets typically bundle this into the",
+        "same outer tx as `execute_transaction` so close is atomic with execute.",
         "",
-        "Constraints:",
+        "Constraints (most enforced via Anchor account constraints):",
         "- proposal must be executed (executed = true)",
-        "- caller must be the original creator (matches transaction.creator)",
-        "- rent refunds to creator",
-        "",
-        "Typically the wallet bundles `close_transaction` into the same outer",
-        "tx as `execute_transaction` so close happens atomically with execute,",
-        "keeping the per-send fee a single network-fee operation."
+        "- signer must equal stored `transaction.payer` (has_one)",
+        "- rent refunds to payer (close = payer)"
       ],
       "discriminator": [
         97,
@@ -112,9 +106,10 @@
         {
           "name": "transaction",
           "docs": [
-            "The proposal account being closed. Anchor's `close = creator` sweeps",
-            "the lamports (rent deposit) into the creator account and zeros the",
-            "account's data + discriminator, returning it to system-owned state."
+            "The proposal account being closed. Anchor's `close = payer` sweeps the",
+            "rent deposit into the payer account and zeros the data + discriminator,",
+            "returning it to system-owned state. `has_one = payer` enforces that",
+            "the signer matches the account that originally funded the rent."
           ],
           "writable": true,
           "pda": {
@@ -147,14 +142,17 @@
           }
         },
         {
-          "name": "creator",
+          "name": "payer",
           "docs": [
-            "Must match the proposal's stored creator. Receives the rent refund.",
-            "Required as a Signer so a third party can't pre-emptively close",
-            "someone's executed proposal to grief them."
+            "Receives the rent refund. Must match the proposal's stored `payer`.",
+            "Signer requirement prevents a third party from closing someone else's",
+            "proposal to grief them."
           ],
           "writable": true,
-          "signer": true
+          "signer": true,
+          "relations": [
+            "transaction"
+          ]
         }
       ],
       "args": [
@@ -198,14 +196,26 @@
           "docs": [
             "Sized to the *actual* bytes this specific proposal needs, not the",
             "MAX_* upper bounds. Avoids the 10240-byte System-Program CPI realloc",
-            "cap that `init` hits when allocating worst-case-sized accounts.",
-            "Proposals whose computed size exceeds `MAX_PROPOSAL_ACCOUNT_BYTES`",
-            "will fail at `init` with the runtime's realloc error."
+            "cap that `init` hits when allocating worst-case-sized accounts."
           ],
           "writable": true
         },
         {
           "name": "creator",
+          "docs": [
+            "Multisig member authorizing the proposal. Verified against the member",
+            "set inside the handler. Does NOT pay rent — that's `payer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Funds the proposal account's rent. Decoupled from `creator` so the",
+            "SSP relay paymaster can underwrite proposal storage without each",
+            "member's leaf needing a SOL balance. Stored on the proposal so",
+            "`close_transaction` refunds rent back to this same account."
+          ],
           "writable": true,
           "signer": true
         },
@@ -608,7 +618,7 @@
     {
       "code": 6020,
       "name": "UnauthorizedCloser",
-      "msg": "Only the original creator can close an executed transaction"
+      "msg": "Only the original payer can close an executed transaction"
     }
   ],
   "types": [
@@ -830,7 +840,16 @@
           {
             "name": "creator",
             "docs": [
-              "Member who created the proposal."
+              "Member who created the proposal (authorizer; NOT the rent funder)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "payer",
+            "docs": [
+              "Account that funded the proposal's rent at create time. `close_transaction`",
+              "refunds rent here. Decoupled from `creator` so a paymaster can pay rent",
+              "while a leaf member authorizes."
             ],
             "type": "pubkey"
           },

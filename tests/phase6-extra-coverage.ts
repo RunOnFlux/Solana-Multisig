@@ -177,6 +177,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -219,6 +220,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -261,6 +263,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -303,6 +306,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -345,6 +349,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -393,6 +398,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -454,6 +460,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -503,6 +510,7 @@ describe("Phase 6: Extra coverage", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -542,6 +550,7 @@ describe("Phase 6: Extra coverage", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -659,6 +668,7 @@ describe("Phase 6: Extra coverage", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])

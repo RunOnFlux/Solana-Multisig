@@ -197,6 +197,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -249,6 +250,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
             multisig,
             transaction: pda,
             creator: stranger.publicKey,
+            payer: stranger.publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([stranger])
@@ -292,6 +294,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -340,6 +343,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -382,6 +386,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
             multisig,
             transaction: pda,
             creator: members[0].publicKey,
+            payer: members[0].publicKey,
             systemProgram: SystemProgram.programId,
           })
           .signers([members[0]])
@@ -411,6 +416,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: t1.pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -429,6 +435,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: t2.pda,
           creator: members[1].publicKey,
+          payer: members[1].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[1]])
@@ -467,6 +474,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -507,6 +515,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -545,6 +554,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -605,6 +615,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -670,6 +681,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -731,6 +743,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -808,6 +821,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -911,6 +925,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])
@@ -974,6 +989,7 @@ describe("Phase 5: Transaction Lifecycle", () => {
           multisig,
           transaction: pda,
           creator: members[0].publicKey,
+          payer: members[0].publicKey,
           systemProgram: SystemProgram.programId,
         })
         .signers([members[0]])

@@ -138,17 +138,20 @@ async function main() {
     toPubkey: recipient.publicKey,
     lamports: transferLamports,
   });
+  // payer = deployer exercises the payer ≠ creator decoupling.
   const createResult = await client.createTransaction(
     multisigAddress,
     0,
     [transferIx],
-    members[0]
+    members[0],
+    deployer
   );
   log(
     "\n[8] Proposal created at index",
     createResult.transactionIndex.toString()
   );
   log("    sig:", createResult.signature);
+  log("    creator: members[0] | payer:", deployer.publicKey.toBase58());
   log("    recipient:", recipient.publicKey.toBase58());
 
   // 9. Collect THRESHOLD approvals (members 0..6 = 7 of 10)

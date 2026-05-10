@@ -2,7 +2,11 @@
  * Devnet smoke test — proves the deployed program works end-to-end.
  *
  *   init 3-of-5 multisig → prefund vault → propose SOL transfer →
- *   3 approvals → execute → verify recipient received funds
+ *   3 approvals → execute → close (rent refund) → verify
+ *
+ * Exercises the payer ≠ creator decoupling: leaf member authorizes the
+ * proposal while a separate `deployer` key funds the rent and receives the
+ * refund on close (mirrors the SSP paymaster flow).
  *
  * Run: yarn ts-node scripts/devnet-smoke-test.ts
  */
@@ -123,17 +127,21 @@ async function main() {
     toPubkey: recipient.publicKey,
     lamports: transferLamports,
   });
+  // Pass `deployer` as the payer to exercise the payer ≠ creator decoupling
+  // (mirrors the SSP paymaster pattern: leaf authorizes, paymaster funds rent).
   const createResult = await client.createTransaction(
     multisigAddress,
     0,
     [transferIx],
-    members[0]
+    members[0],
+    deployer
   );
   log(
     "\n[8] Proposal created at index",
     createResult.transactionIndex.toString()
   );
   log("    sig:", createResult.signature);
+  log("    creator: members[0] | payer:", deployer.publicKey.toBase58());
   log("    recipient:", recipient.publicKey.toBase58());
 
   // 9. Threshold approvals
@@ -161,6 +169,45 @@ async function main() {
   );
   log("\n[10] Executed");
   log("     sig:", execSig);
+
+  // 10b. Close the executed proposal — rent refunds to the original payer
+  // (deployer). Proves payer-decoupled rent recovery on devnet.
+  const proposalAcc = await connection.getAccountInfo(
+    createResult.transactionAddress
+  );
+  const rentLocked = proposalAcc?.lamports ?? 0;
+  const payerBefore = await connection.getBalance(deployer.publicKey);
+
+  const closeIx = await client.buildCloseTransactionInstruction({
+    multisigAddress,
+    transactionAddress: createResult.transactionAddress,
+    transactionIndex: createResult.transactionIndex,
+    payer: deployer.publicKey,
+  });
+  const closeTx = new Transaction().add(closeIx);
+  const { blockhash } = await connection.getLatestBlockhash();
+  closeTx.recentBlockhash = blockhash;
+  closeTx.feePayer = deployer.publicKey;
+  closeTx.sign(deployer);
+  const closeSig = await connection.sendRawTransaction(closeTx.serialize());
+  await connection.confirmTransaction(closeSig, "confirmed");
+  log("\n[10b] Proposal closed — rent refunded to payer (deployer)");
+  log("      sig:", closeSig);
+
+  const closedAcc = await connection.getAccountInfo(
+    createResult.transactionAddress
+  );
+  if (closedAcc !== null) {
+    throw new Error("FAIL: proposal account still exists after close");
+  }
+  const payerAfter = await connection.getBalance(deployer.publicKey);
+  log(
+    "      rent refunded:",
+    sol(rentLocked),
+    "SOL (payer Δ:",
+    sol(payerAfter - payerBefore),
+    "SOL incl. close fee)"
+  );
 
   // 11. Verify
   const vaultAfter = await connection.getBalance(vaultPda);

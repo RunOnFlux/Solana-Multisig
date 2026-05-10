@@ -325,7 +325,8 @@ async function main() {
       multisigAddress,
       0,
       message,
-      members[0]
+      members[0],
+      deployer
     );
     log("    Proposal accepted on-chain ✓");
     log("    sig:", createResult.signature);
