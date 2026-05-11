@@ -103,7 +103,7 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 | Limit | Value | Rationale |
 |---|---|---|
 | `MAX_MEMBERS` | 30 | Treasury governance + enterprise dual-signing (2 ed25519 keys per SSP signer × 15 signers) |
-| `MAX_TX_ACCOUNT_KEYS` | 32 | Static account_keys per proposal |
+| `MAX_TX_ACCOUNT_KEYS` | 128 | Static account_keys per proposal |
 | `MAX_TX_INSTRUCTIONS` | 16 | Per proposal (CU-limited at execute) |
 | `MAX_INSTRUCTION_ACCOUNTS` | 64 | Per instruction (1-byte indexes) |
 | `MAX_INSTRUCTION_DATA_LEN` | 1024 | Bytes per instruction |
@@ -171,11 +171,11 @@ The actual program-level differentiators (no UX layers, no infrastructure, just 
 
 4. **Threshold enforced only at spend, not at registration** — this mirrors Bitcoin P2WSH (the address IS the hash of the script; anyone can fund it; only valid script-satisfying signatures can spend it). Init has no signer requirement at all; `create_transaction` / `approve_transaction` / `execute_transaction` enforce M-of-N. Permissionless registration is what makes M-of-N enterprise vaults trivial — the relay paymaster can register a vault with no member coordination.
 
-5. **ALT-rejection in proposals (Option D)** — `create_transaction` rejects non-empty `address_table_lookups`, preventing executor-side ALT substitution attacks where someone could swap a different ALT at execute time to redirect CPI destinations.
+5. **ALT-rejection in proposals** — `create_transaction` rejects non-empty `address_table_lookups`, preventing executor-side ALT substitution attacks where someone could swap a different ALT at execute time to redirect CPI destinations.
 
 ### What's not a differentiator
 
-**Fee sponsorship / paymaster** — any wallet on top of any Solana multisig can layer on a paymaster (Squads-using wallets like Fuse and Backpack ship comparable sponsored-fee experiences without changing the underlying multisig). SSP Wallet runs a paymaster via the open-source ssp-relay so users don't need SOL in their leaf keypair, but that's a UX choice, not a protocol-level difference.
+**Fee sponsorship / paymaster** — any wallet on top of any Solana multisig can layer on a paymaster (Squads-using wallets like Fuse, which is built on Squads V4 by Squads Labs, ship comparable sponsored-fee experiences without changing the underlying multisig). SSP Wallet runs a paymaster via the open-source ssp-relay so users don't need SOL in their leaf keypair, but that's a UX choice, not a protocol-level difference.
 
 The program-level differences above are what actually distinguish this design.
 

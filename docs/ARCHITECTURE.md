@@ -22,7 +22,8 @@
 ┌─────────────────────────────────────────┐
 │       Anchor Program (Rust)             │
 │  - PDA derivation (multisig + vault)    │
-│  - Ed25519 sysvar-based init verify     │
+│  - Permissionless init (PDA bound to    │
+│    canonical members via sha256 check)  │
 │  - Proposal storage (V0 message)        │
 │  - Vault-as-signer CPI execution        │
 └─────────────────────────────────────────┘
@@ -37,7 +38,6 @@ pub struct Multisig {
     pub members: Vec<Pubkey>,    // sorted, deduped
     pub threshold: u8,
     pub transaction_index: u64,  // atomic counter, incremented at create
-    pub is_initialized: bool,
     pub bump: u8,
 }
 ```
@@ -74,7 +74,8 @@ Never explicitly created — exists as an address. Anyone can transfer SOL or cr
 pub struct VaultTransaction {
     pub multisig: Pubkey,
     pub transaction_index: u64,
-    pub creator: Pubkey,
+    pub creator: Pubkey,           // authorizing member (not the rent payer)
+    pub payer: Pubkey,             // funded proposal rent; refunded on close
     pub bump: u8,
     pub vault_index: u8,           // which vault this proposal targets
     pub vault_bump: u8,            // cached for invoke_signed at execute
@@ -97,11 +98,11 @@ pub struct TransactionMessage {
     pub num_writable_non_signers: u8,
     pub account_keys: Vec<Pubkey>,           // [0] = vault PDA
     pub instructions: Vec<CompiledInstruction>,
-    pub address_table_lookups: Vec<MessageAddressTableLookup>,
+    pub address_table_lookups: Vec<MessageAddressTableLookup>, // must be empty (rejected at create)
 }
 ```
 
-Mirrors Solana's MessageV0 minus `recent_blockhash` and `fee_payer`. Account references in `instructions` are 1-byte indexes into the combined account list (`account_keys` + ALT-loaded writable + ALT-loaded readonly), not raw 32-byte pubkeys — big storage win for proposals that touch many accounts (Jupiter swaps with ~50 accounts fit comfortably).
+Mirrors Solana's MessageV0 minus `recent_blockhash` and `fee_payer`. Account references in `instructions` are 1-byte indexes into `account_keys`, not raw 32-byte pubkeys — big storage win for proposals that touch many accounts (Jupiter swaps with ~50 accounts fit comfortably under `MAX_TX_ACCOUNT_KEYS = 128`). `address_table_lookups` is preserved structurally to mirror Solana's MessageV0 but `create_transaction` rejects non-empty lookups (executor-side ALT substitution would otherwise redirect CPI destinations).
 
 ## Lifecycle
 
@@ -117,8 +118,9 @@ Mirrors Solana's MessageV0 minus `recent_blockhash` and `fee_payer`. Account ref
                           │
                           ▼
                  ┌──────────────────┐
-       (3) INIT: threshold members sign canonical message;
-           submit Ed25519 verify ixs + initialize_multisig in one tx
+       (3) INIT (permissionless): anyone calls initialize_multisig
+           with (member_hash, threshold, member_count) + members in
+           remaining_accounts. Program verifies sha256(sorted) == hash.
                  └──────────────────┘
                           │
                           ▼
@@ -192,10 +194,10 @@ transaction.executed = true;
 transaction.exit(ctx.program_id)?;  // flush to on-chain data
 
 // 3. Resolve combined account list
-combined = [
-    ...message.account_keys,                  // static
-    ...remaining[static_count..]              // ALT-loaded
-]
+//    Proposals reject non-empty address_table_lookups at create time,
+//    so the combined list is just the static account_keys. remaining[i]
+//    must equal account_keys[i] for every i (binding check).
+combined = [...message.account_keys]
 
 // 4. CPI each compiled instruction with vault as signer
 let vault_seeds = &[b"vault", multisig.key, &[vault_index], &[vault_bump]];
@@ -218,6 +220,6 @@ Even though we have a vault concept (Squads-style), the self-initiating property
 - Both addresses are computable BEFORE any on-chain action
 - Vault can be pre-funded (it's just a system PDA)
 - Multisig can be pre-funded too (Anchor handles pre-funded init), but typical SSP flow funds the vault, not the multisig
-- Init requires threshold consent — no single-creator dominance
+- Init is permissionless — no signer requirement at registration; canonical PDA binding (sha256 of sorted members) prevents subversion. Funds are gated by the M-of-N threshold check on `create_transaction` / `approve_transaction` / `execute_transaction`, not on init.
 
 The architecture matches Squads V4 in vault-vs-multisig separation, but the multisig identity model is fundamentally different — Squads requires a `create_key` (random pubkey provided at create), making their multisigs NOT self-initiating.

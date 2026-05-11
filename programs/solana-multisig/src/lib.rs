@@ -804,8 +804,8 @@ pub struct TransactionMessage {
     /// Number of writable non-signers in account_keys (after the signers block).
     pub num_writable_non_signers: u8,
 
-    /// Static account keys. By convention, the multisig PDA must be at index 0
-    /// as the canonical writable signer.
+    /// Static account keys. By convention, the vault PDA must be at index 0
+    /// as the canonical writable signer (enforced in `create_transaction`).
     #[max_len(MAX_TX_ACCOUNT_KEYS)]
     pub account_keys: Vec<Pubkey>,
 
@@ -1176,12 +1176,12 @@ pub const MAX_ADDRESS_TABLE_LOOKUPS: usize = 4;
 
 /// Maximum number of indexes per ALT lookup (writable and readonly each).
 ///
-/// Tuned alongside MAX_TX_ACCOUNT_KEYS and MAX_ADDRESS_TABLE_LOOKUPS so that
-/// the maximum combined account count never exceeds Solana's 256-account
-/// per-tx cap (u8 index space):
-///   max_combined = MAX_TX_ACCOUNT_KEYS
-///                + MAX_ADDRESS_TABLE_LOOKUPS * 2 * MAX_INDEXES_PER_LOOKUP
-///                = 32 + 4 * 2 * 28 = 256
+/// Note: `create_transaction` rejects non-empty `address_table_lookups` in
+/// proposal messages (ALT-substitution protection), so these constants on
+/// `MessageAddressTableLookup` are effectively dead code paths kept only to
+/// preserve the V0-mirroring struct shape. The actual per-proposal account
+/// count cap is `MAX_TX_ACCOUNT_KEYS = 128`, well under Solana's 256-account
+/// per-tx u8-index cap.
 pub const MAX_INDEXES_PER_LOOKUP: usize = 28;
 
 /// Solana hard cap on accounts per transaction (u8 index space).
