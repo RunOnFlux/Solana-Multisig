@@ -138,8 +138,10 @@ See [`examples/full-flow.ts`](./examples/full-flow.ts) for a complete end-to-end
 |---|---|
 | `deriveAddress(members, threshold)` | Compute the multisig PDA off-chain. |
 | `deriveVaultAddress(multisig, vaultIndex)` | Compute the vault PDA (deposit address) off-chain. |
+| `deriveNonceAccount(multisig)` | Compute the durable-nonce account address off-chain. Pure derivation from the multisig PDA — paymaster-independent. |
 | `createMembersAddressLookupTable(members, payer)` | Create an ALT for member-list compaction (needed for >5 members under the 1232-byte tx cap). |
 | `initialize(members, threshold, payer, alt?)` | Submit the permissionless init tx. Anyone can call. |
+| `provisionNonce({ multisigAddress, payer })` | One-shot create + initialize the durable nonce account for a multisig. Permissionless; payer funds rent (~0.00144 SOL) and becomes the initial authority. |
 | `preFund(address, amount, funder)` | Convenience helper to send SOL to a vault. |
 | `createTransaction(multisig, vaultIndex, instructions, creator)` | Propose a transaction the multisig should execute. |
 | `createTransactionFromMessage(multisig, vaultIndex, message, creator)` | Propose with a pre-built V0 message (for SPL, ALT-using complex flows, etc.). |
@@ -156,6 +158,7 @@ For bundling multiple program calls into a single Solana transaction (e.g., for 
 |---|---|---|
 | `predictNextTransactionPda(multisig, currentIndex)` | `{ transactionAddress, transactionIndex }` | Compute the next proposal PDA before fetching it on-chain. |
 | `buildInitializeMultisigInstruction(opts)` | `{ instruction, multisigAddress, bump }` | Bundle the (permissionless) init ix into a multi-ix tx — e.g. silently included on first send. |
+| `buildProvisionNonceInstruction(opts)` | `{ instruction, nonceAccount }` | Bundle the (permissionless) durable-nonce provision ix — e.g. bundled with init on the very first send. |
 | `buildCreateTransactionInstruction(opts)` | `{ instruction, transactionAddress, transactionIndex }` | Build a proposal ix without auto-sending. |
 | `buildApproveTransactionInstruction(opts)` | `TransactionInstruction` | Build an approval ix; member must be a tx-level signer. |
 | `buildExecuteTransactionInstruction(opts)` | `TransactionInstruction` | Build an execute ix with explicit `remainingAccounts`. |
@@ -227,11 +230,22 @@ Init has no signer-count ceiling now that it's permissionless (no ed25519 ix to 
 - **No ALT in proposals** — `create_transaction` rejects non-empty `address_table_lookups` in proposal messages, preventing ALT-substitution attacks where an executor swaps a different ALT at execute time.
 - **Re-initialization prevented** — `init` constraint guarantees the PDA can only be initialized once.
 
+## Durable nonces (eliminating the wallet→key blockhash race)
+
+When wallet and key sign at different times — wallet pre-signs, push notification fires, user approves on phone minutes later — Solana's 60-second blockhash validity window would normally expire the wallet's signature. The SDK's durable-nonce flow eliminates this race:
+
+- Each multisig gets a **durable nonce account** at a deterministic address `Pubkey.createWithSeed(multisigPda, "nonce", SystemProgram)`. Paymaster-independent — re-derivable from the multisig alone, no DB lookup, no on-chain config.
+- The on-chain `provision_nonce` ix creates this account at the canonical address using `invoke_signed` with the multisig PDA as the seed base. Permissionless — anyone can pay rent + become the initial authority.
+- Sends after first use the nonce as `recentBlockhash` with `SystemProgram.nonceAdvance` at ix[0]. Wallet's signature stays valid arbitrarily long across the wallet→relay→push→user-approve→key-sign round trip.
+- Paymaster rotation: authority transfers via standard `SystemProgram.nonceAuthorize`. Address never changes.
+
+Cost: one-time ~0.00144 SOL rent per multisig (refundable via `nonceWithdraw` if vault ever closes). Tx size adds ~70 bytes for the `nonceAdvance` ix.
+
 ## Status
 
 - ✅ Devnet deployed
-- ✅ End-to-end smoke tests passing on devnet (SOL, SPL, 7-of-10, Jupiter format)
-- ✅ 61/61 unit/integration tests passing
+- ✅ End-to-end smoke tests passing on devnet (SOL, SPL, 7-of-10, Jupiter format, bundled single-tx, decoupled-init, **durable-nonce flow with 90s pause**, **bundled first-send with init+provision+send**)
+- ✅ Anchor test phases (1, 4-unit, 4-integration, 4-security, 5, 6, 7, 8) passing in isolation
 
 ## License
 

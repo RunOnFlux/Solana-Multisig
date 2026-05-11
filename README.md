@@ -96,6 +96,7 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 | Re-init prevention | Anchor's `init` constraint guarantees the PDA can only be initialized once |
 | Account validation | Anchor's seeds + bump constraints + owner check on every account |
 | Member-set immutability | `members`, `threshold`, `bump` are written once at init; no instruction can modify them post-init |
+| Durable nonce for human-loop signing | `provision_nonce` creates a system-owned nonce account at `createWithSeed(multisigPda, "nonce", SystemProgram)`. Sends after first use `SystemProgram.nonceAdvance` at ix[0] + the nonce value as `recentBlockhash` → wallet's signature survives arbitrary user-approval delays. Address is pure-derivable (paymaster-independent); paymaster rotation transfers authority via standard `SystemProgram.nonceAuthorize` |
 
 ## Limits
 
@@ -145,6 +146,7 @@ Tests live in `tests/`:
 - `phase5-transactions.ts` — full proposal lifecycle (create / approve / execute)
 - `phase6-extra-coverage.ts` — boundary tests + SPL token transfer
 - `phase7-close-transaction.ts` — proposal close + rent refund
+- `phase8-provision-nonce.ts` — durable nonce account provisioning
 
 Smoke tests against devnet live in `scripts/`:
 - `devnet-smoke-test.ts` — basic 3-of-5 SOL flow
@@ -153,6 +155,8 @@ Smoke tests against devnet live in `scripts/`:
 - `devnet-bundled-singletx-test.ts` — consumer SSP pattern (init + create + approve×2 + execute + close in ONE V0 tx)
 - `devnet-decoupled-init-test.ts` — enterprise pattern (paymaster pre-inits with no members online, members operate later)
 - `devnet-jupiter-format-test.ts` — Jupiter swap fits proposal format
+- `devnet-durable-nonce-test.ts` — durable-nonce flow: provision + bundled send with 90s pause between wallet sign and key sign (no blockhash race)
+- `devnet-first-send-bundled-test.ts` — bundled first send (init + provision_nonce + create + approve×2 + execute + close, all 7 ixs in one V0 tx; 985 bytes)
 
 ## How this differs from Squads V4
 

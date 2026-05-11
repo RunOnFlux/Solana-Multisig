@@ -46,6 +46,18 @@ Seed: `[b"multisig", sha256(sorted_members), &[threshold]]` (full 32 bytes — t
 
 Created once via `initialize_multisig`. Members and threshold are immutable after init — to "rotate keys" migrate funds to a new multisig with new keys.
 
+### Nonce PDA — durable nonce (system-owned, 80 bytes)
+
+```
+Pubkey::createWithSeed(multisigPda, "nonce", SystemProgram)
+```
+
+Provisioned via the `provision_nonce` ix using `invoke_signed` with the multisig PDA as the `createAccountWithSeed` base, so the address is purely a function of the multisig — paymaster-independent, re-derivable from the multisig alone.
+
+The nonce account stores a 32-byte nonce hash that acts as a long-lived `recent_blockhash` for txes containing `SystemProgram.nonceAdvance` at ix[0]. Used by SSP to eliminate the 60s blockhash-expiry race when wallet pre-signs a tx that Key signs/broadcasts minutes later (after user approves on phone).
+
+Authority on the nonce account starts as `payer` (typically the relay paymaster). Transferable via standard `SystemProgram.nonceAuthorize` — address never changes on paymaster rotation.
+
 ### Vault PDA — funds (system-owned, no data)
 
 Derived once for any `vault_index`:

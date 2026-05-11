@@ -2,6 +2,9 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::hash::hash;
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program::invoke_signed;
+use anchor_lang::system_program::{
+    create_nonce_account_with_seed, CreateNonceAccountWithSeed,
+};
 
 declare_id!("CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX");
 
@@ -630,6 +633,81 @@ pub mod solana_multisig {
 
         Ok(())
     }
+
+    /// Provision a durable nonce account at a deterministic address derived
+    /// from this multisig. Permissionless — anyone can pay the rent to
+    /// provision; the `payer` becomes the nonce's initial authority and is
+    /// typically the relay paymaster.
+    ///
+    /// The nonce account address is
+    ///   `Pubkey::create_with_seed(multisig_pda, NONCE_SEED, system_program::ID)`
+    /// so any client can re-derive it from the multisig alone — no DB,
+    /// no on-chain bookkeeping, paymaster-rotation safe (rotation just
+    /// transfers authority via `SystemProgram::nonceAuthorize`; address
+    /// stays the same).
+    ///
+    /// Once provisioned, this nonce is used by clients (wallet/key) as the
+    /// `recent_blockhash` in send transactions, with `SystemProgram::
+    /// nonceAdvance` as ix[0]. That eliminates the 60-second blockhash
+    /// expiry race that would otherwise plague flows where wallet pre-signs
+    /// and Key signs later (after user approval).
+    ///
+    /// Idempotent in spirit: callable once per multisig (SystemProgram's
+    /// `createAccountWithSeed` will fail if the account already exists,
+    /// which clients should treat as success — the nonce is already
+    /// available).
+    pub fn provision_nonce(ctx: Context<ProvisionNonce>) -> Result<()> {
+        // Derive the multisig PDA's signer seeds so SystemProgram's
+        // create_account_with_seed will accept invoke_signed for "base".
+        // We need member_hash (sha256 of sorted_members, which is what
+        // the multisig PDA was originally derived from).
+        let member_hash = hash_members(&ctx.accounts.multisig.members);
+        let threshold_byte = [ctx.accounts.multisig.threshold];
+        let bump_byte = [ctx.accounts.multisig.bump];
+        let multisig_signer_seeds: &[&[&[u8]]] = &[&[
+            b"multisig",
+            &member_hash,
+            &threshold_byte,
+            &bump_byte,
+        ]];
+
+        let rent_lamports = ctx.accounts.rent.minimum_balance(NONCE_ACCOUNT_LENGTH);
+        let authority = ctx.accounts.payer.key();
+
+        // Single Anchor helper that emits two CPIs in sequence:
+        //   1. SystemProgram::create_account_with_seed (multisig PDA as base,
+        //      payer funds rent, address verified deterministic)
+        //   2. SystemProgram::nonce_initialize (payer as authority)
+        // invoke_signed uses the multisig's seeds so the System Program
+        // accepts the multisig PDA as the seed-derivation base.
+        create_nonce_account_with_seed(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                CreateNonceAccountWithSeed {
+                    from: ctx.accounts.payer.to_account_info(),
+                    nonce: ctx.accounts.nonce_account.to_account_info(),
+                    base: ctx.accounts.multisig.to_account_info(),
+                    recent_blockhashes: ctx
+                        .accounts
+                        .recent_blockhashes
+                        .to_account_info(),
+                    rent: ctx.accounts.rent.to_account_info(),
+                },
+            )
+            .with_signer(multisig_signer_seeds),
+            rent_lamports,
+            NONCE_SEED,
+            &authority,
+        )?;
+
+        msg!(
+            "✅ Nonce account provisioned at {} (authority: {})",
+            ctx.accounts.nonce_account.key(),
+            authority
+        );
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -920,6 +998,37 @@ pub struct CloseTransaction<'info> {
     pub payer: Signer<'info>,
 }
 
+#[derive(Accounts)]
+pub struct ProvisionNonce<'info> {
+    /// The multisig — used as the seed base for the nonce account address
+    /// (so the address is paymaster-independent and any client can re-derive
+    /// it from the multisig alone).
+    pub multisig: Account<'info, Multisig>,
+
+    /// The durable nonce account being created. Its address must equal
+    /// `Pubkey::create_with_seed(multisig.key(), NONCE_SEED, system_program::ID)`
+    /// — SystemProgram's `createAccountWithSeed` CPI rejects any other address.
+    /// Owned by SystemProgram once initialized.
+    /// CHECK: address-validated by SystemProgram inside the CPI.
+    #[account(mut)]
+    pub nonce_account: UncheckedAccount<'info>,
+
+    /// Funds the nonce account's rent and becomes the initial authority.
+    /// Permissionless — anyone can call this; typically the SSP relay
+    /// paymaster does it.
+    #[account(mut)]
+    pub payer: Signer<'info>,
+
+    /// Required by SystemProgram::nonceInitialize. Must be the recent
+    /// blockhashes sysvar account.
+    /// CHECK: address checked against the canonical sysvar ID.
+    #[account(address = anchor_lang::solana_program::sysvar::recent_blockhashes::ID)]
+    pub recent_blockhashes: UncheckedAccount<'info>,
+
+    pub rent: Sysvar<'info, Rent>,
+    pub system_program: Program<'info, System>,
+}
+
 // ============================================================================
 // Helper Functions - Phase 1 Core Logic
 // ============================================================================
@@ -1091,6 +1200,18 @@ pub const MAX_PROPOSAL_ACCOUNT_BYTES: usize = 10240;
 /// hold the actual funds (SOL + SPL tokens) governed by a multisig.
 /// Derived as `[VAULT_PDA_SEED, multisig.key(), &[vault_index]]`.
 pub const VAULT_PDA_SEED: &[u8] = b"vault";
+
+/// Seed used with `Pubkey::create_with_seed(multisig.key(), NONCE_SEED, system_program::ID)`
+/// to deterministically derive the durable nonce account address for a multisig.
+///
+/// Must be a `&str` (not `&[u8]`) because that's the exact type
+/// `SystemProgram::create_account_with_seed` expects.
+pub const NONCE_SEED: &str = "nonce";
+
+/// Size of a Solana durable nonce account (matches the System Program's
+/// `nonce::State::size()`). 4 (version) + 4 (state tag) + 32 (authority)
+/// + 32 (nonce) + 8 (fee_calculator).
+pub const NONCE_ACCOUNT_LENGTH: usize = 80;
 
 // ============================================================================
 // Error Codes

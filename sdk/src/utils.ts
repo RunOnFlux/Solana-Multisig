@@ -1,4 +1,8 @@
-import { PublicKey, TransactionInstruction } from "@solana/web3.js";
+import {
+  PublicKey,
+  SystemProgram,
+  TransactionInstruction,
+} from "@solana/web3.js";
 import { createHash } from "crypto";
 import { TransactionMessage, CompiledInstruction } from "./types";
 
@@ -6,6 +10,46 @@ import { TransactionMessage, CompiledInstruction } from "./types";
  * PDA seed prefix for vault accounts. Must match VAULT_PDA_SEED in the program.
  */
 export const VAULT_PDA_SEED = Buffer.from("vault");
+
+/**
+ * Seed used by `provision_nonce` to derive the durable nonce account
+ * address for a multisig. Must match `NONCE_SEED` in the program.
+ *
+ *   nonceAccount = PublicKey.createWithSeed(
+ *     multisigPda,
+ *     NONCE_SEED,
+ *     SystemProgram.programId,
+ *   )
+ *
+ * Address is paymaster-independent — purely a function of the multisig PDA.
+ */
+export const NONCE_SEED = "nonce";
+
+/**
+ * Size of a Solana durable nonce account. Matches NONCE_ACCOUNT_LENGTH in
+ * the program (and Solana's nonce::State::size()).
+ */
+export const NONCE_ACCOUNT_LENGTH = 80;
+
+/**
+ * Derive the durable nonce account address for a multisig. Pure derivation
+ * from the multisig PDA — no paymaster lookup, no DB, no on-chain query.
+ *
+ * Use cases:
+ *  - Wallet building a send: derive nonce address, fetch its current nonce
+ *    value, use as `recentBlockhash` and prepend `SystemProgram.nonceAdvance`.
+ *  - Relay checking provisioning: derive address, call `getAccountInfo`, if
+ *    null then call `provision_nonce` once to set it up.
+ */
+export async function deriveNonceAccount(
+  multisigPda: PublicKey
+): Promise<PublicKey> {
+  return PublicKey.createWithSeed(
+    multisigPda,
+    NONCE_SEED,
+    SystemProgram.programId
+  );
+}
 
 /**
  * Derive a vault PDA owned by SystemProgram (no data) for a given multisig

@@ -413,29 +413,26 @@
     {
       "name": "initialize_multisig",
       "docs": [
-        "Initialize a self-initiating multisig.",
+        "Initialize a multisig at its deterministic PDA. Permissionless.",
         "",
-        "Members are passed via `remaining_accounts` (typically resolved from",
-        "an Address Lookup Table the client set up beforehand) so they cost",
-        "only ~1 byte each in the transaction instead of 32. This is what",
-        "lets us fit \"any 7-of-N\" multisigs (single-sig mode) into Solana's",
-        "1232-byte transaction cap.",
+        "The multisig PDA is `find_program_address([\"multisig\", member_hash,",
+        "threshold], program_id)` where `member_hash = sha256(sorted_members)`.",
+        "Anyone can call this — there is nothing to steal by front-running",
+        "because (a) the PDA address is fully determined by the inputs, so",
+        "initializing with different inputs lands at a different address and",
+        "cannot squat the canonical vault address, and (b) no funds exist at",
+        "the PDA prior to init. Authorization is enforced by the M-of-N",
+        "threshold on `create_transaction` / `approve_transaction` /",
+        "`execute_transaction`, not on registration.",
         "",
-        "`member_hash` is `sha256(sorted_members)` computed off-chain by the",
-        "client and used to derive the multisig PDA. The function recomputes",
-        "the hash from the actual `remaining_accounts` and rejects if it",
-        "disagrees — this binds the PDA address to the on-chain stored",
-        "member set.",
+        "This mirrors how P2WSH multisig works on Bitcoin: the address IS",
+        "the hash of the script (members + threshold). No init signatures",
+        "are required because there is no way to subvert the canonical",
+        "address without the canonical inputs.",
         "",
-        "SECURITY: each member signs a fixed-size init message off-chain",
-        "(`prefix || sha256(sorted_members) || threshold` — 53 bytes",
-        "regardless of N). The SDK packs all signatures into a single",
-        "Ed25519 native-program instruction at index 0 of the same tx; we",
-        "read it via the Instructions Sysvar, confirm it verified OUR init",
-        "message, and harvest the list of signers.",
-        "",
-        "NO DETERMINISTIC PRIVATE KEYS — only member signatures verified",
-        "on-chain via the native Ed25519 program."
+        "Members are passed via `remaining_accounts` (typically resolved",
+        "from an Address Lookup Table so each costs ~1 byte instead of 32).",
+        "`member_count` is an ix arg so Anchor can size the account exactly."
       ],
       "discriminator": [
         220,
@@ -460,6 +457,10 @@
         },
         {
           "name": "payer",
+          "docs": [
+            "Anyone can pay — init is permissionless. The fee payer of the outer",
+            "tx pays the rent; no signature from any member is required."
+          ],
           "writable": true,
           "signer": true
         },
@@ -487,6 +488,90 @@
           "type": "u8"
         }
       ]
+    },
+    {
+      "name": "provision_nonce",
+      "docs": [
+        "Provision a durable nonce account at a deterministic address derived",
+        "from this multisig. Permissionless — anyone can pay the rent to",
+        "provision; the `payer` becomes the nonce's initial authority and is",
+        "typically the relay paymaster.",
+        "",
+        "The nonce account address is",
+        "`Pubkey::create_with_seed(multisig_pda, NONCE_SEED, system_program::ID)`",
+        "so any client can re-derive it from the multisig alone — no DB,",
+        "no on-chain bookkeeping, paymaster-rotation safe (rotation just",
+        "transfers authority via `SystemProgram::nonceAuthorize`; address",
+        "stays the same).",
+        "",
+        "Once provisioned, this nonce is used by clients (wallet/key) as the",
+        "`recent_blockhash` in send transactions, with `SystemProgram::",
+        "nonceAdvance` as ix[0]. That eliminates the 60-second blockhash",
+        "expiry race that would otherwise plague flows where wallet pre-signs",
+        "and Key signs later (after user approval).",
+        "",
+        "Idempotent in spirit: callable once per multisig (SystemProgram's",
+        "`createAccountWithSeed` will fail if the account already exists,",
+        "which clients should treat as success — the nonce is already",
+        "available)."
+      ],
+      "discriminator": [
+        253,
+        126,
+        44,
+        250,
+        91,
+        181,
+        192,
+        62
+      ],
+      "accounts": [
+        {
+          "name": "multisig",
+          "docs": [
+            "The multisig — used as the seed base for the nonce account address",
+            "(so the address is paymaster-independent and any client can re-derive",
+            "it from the multisig alone)."
+          ]
+        },
+        {
+          "name": "nonce_account",
+          "docs": [
+            "The durable nonce account being created. Its address must equal",
+            "`Pubkey::create_with_seed(multisig.key(), NONCE_SEED, system_program::ID)`",
+            "— SystemProgram's `createAccountWithSeed` CPI rejects any other address.",
+            "Owned by SystemProgram once initialized."
+          ],
+          "writable": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Funds the nonce account's rent and becomes the initial authority.",
+            "Permissionless — anyone can call this; typically the SSP relay",
+            "paymaster does it."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "recent_blockhashes",
+          "docs": [
+            "Required by SystemProgram::nonceInitialize. Must be the recent",
+            "blockhashes sysvar account."
+          ],
+          "address": "SysvarRecentB1ockHashes11111111111111111111"
+        },
+        {
+          "name": "rent",
+          "address": "SysvarRent111111111111111111111111111111111"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
     }
   ],
   "accounts": [
@@ -535,96 +620,76 @@
     },
     {
       "code": 6003,
-      "name": "InsufficientSignatures",
-      "msg": "Insufficient signatures provided"
-    },
-    {
-      "code": 6004,
       "name": "InvalidPDA",
       "msg": "Invalid PDA derivation"
     },
     {
-      "code": 6005,
-      "name": "UnauthorizedSigner",
-      "msg": "Signer is not an authorized member"
-    },
-    {
-      "code": 6006,
-      "name": "DuplicateSignature",
-      "msg": "Duplicate signature from same member"
-    },
-    {
-      "code": 6007,
-      "name": "InvalidSignature",
-      "msg": "Invalid Ed25519 signature - cryptographic verification failed"
-    },
-    {
-      "code": 6008,
+      "code": 6004,
       "name": "UnauthorizedMember",
       "msg": "Member is not authorized for this multisig"
     },
     {
-      "code": 6009,
+      "code": 6005,
       "name": "InvalidTransaction",
       "msg": "Invalid transaction"
     },
     {
-      "code": 6010,
+      "code": 6006,
       "name": "InvalidTransactionIndex",
       "msg": "Invalid transaction index"
     },
     {
-      "code": 6011,
+      "code": 6007,
       "name": "AlreadyApproved",
       "msg": "Transaction already approved by this member"
     },
     {
-      "code": 6012,
+      "code": 6008,
       "name": "AlreadyExecuted",
       "msg": "Transaction already executed"
     },
     {
-      "code": 6013,
+      "code": 6009,
       "name": "InsufficientApprovals",
       "msg": "Insufficient approvals to execute"
     },
     {
-      "code": 6014,
+      "code": 6010,
       "name": "CpiExecutionFailed",
       "msg": "CPI execution failed"
     },
     {
-      "code": 6015,
+      "code": 6011,
       "name": "InvalidMessage",
       "msg": "Transaction message is malformed or violates structural invariants"
     },
     {
-      "code": 6016,
+      "code": 6012,
       "name": "TransactionIndexOverflow",
       "msg": "Transaction index counter overflow"
     },
     {
-      "code": 6017,
+      "code": 6013,
       "name": "InsufficientRemainingAccounts",
       "msg": "remaining_accounts has fewer entries than the proposal requires"
     },
     {
-      "code": 6018,
+      "code": 6014,
       "name": "AccountMismatch",
       "msg": "Provided account does not match the static account_keys entry"
     },
     {
-      "code": 6019,
+      "code": 6015,
       "name": "NotExecuted",
       "msg": "Cannot close transaction: not yet executed"
     },
     {
-      "code": 6020,
+      "code": 6016,
       "name": "UnauthorizedCloser",
       "msg": "Only the original payer can close an executed transaction"
     },
     {
-      "code": 6021,
+      "code": 6017,
       "name": "InvalidMemberCount",
       "msg": "Member count argument does not match the provided members list"
     }

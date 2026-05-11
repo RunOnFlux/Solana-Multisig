@@ -4,6 +4,8 @@ import {
   Keypair,
   Transaction,
   SystemProgram,
+  SYSVAR_RECENT_BLOCKHASHES_PUBKEY,
+  SYSVAR_RENT_PUBKEY,
   TransactionInstruction,
   TransactionMessage as Web3TransactionMessage,
   VersionedTransaction,
@@ -21,6 +23,7 @@ import {
 } from "./types";
 import {
   deriveMultisigAddress,
+  deriveNonceAccount,
   deriveVaultAddress,
   hashMembers,
   sortMembers,
@@ -779,6 +782,70 @@ export class SolanaMultisigClient {
         payer: opts.payer,
       })
       .instruction();
+  }
+
+  /**
+   * Build the `provision_nonce` instruction (ix only).
+   *
+   * Creates a durable nonce account at the deterministic address
+   * `Pubkey.createWithSeed(multisigPda, "nonce", SystemProgram)`. The
+   * address is purely a function of the multisig PDA — paymaster-independent,
+   * so re-derivation works across paymaster rotations.
+   *
+   * Permissionless: anyone can call this; whoever does (`payer`) funds the
+   * ~0.00144 SOL rent and becomes the initial nonce authority. For SSP this
+   * is always the relay paymaster.
+   *
+   * One-time per multisig — calling a second time will fail with the System
+   * Program rejecting the create (account already exists at the derived
+   * address). Callers should treat that as success (nonce already available).
+   */
+  async buildProvisionNonceInstruction(opts: {
+    multisigAddress: PublicKey;
+    payer: PublicKey;
+  }): Promise<{
+    instruction: TransactionInstruction;
+    nonceAccount: PublicKey;
+  }> {
+    const nonceAccount = await deriveNonceAccount(opts.multisigAddress);
+    const instruction = await this.program.methods
+      .provisionNonce()
+      .accounts({
+        multisig: opts.multisigAddress,
+        nonceAccount,
+        payer: opts.payer,
+        recentBlockhashes: SYSVAR_RECENT_BLOCKHASHES_PUBKEY,
+        rent: SYSVAR_RENT_PUBKEY,
+        systemProgram: SystemProgram.programId,
+      })
+      .instruction();
+    return { instruction, nonceAccount };
+  }
+
+  /**
+   * Convenience: provision the nonce account for a multisig in a one-off tx.
+   *
+   * Idempotent in spirit — if the nonce already exists, this errors out with
+   * a System Program "account already in use" error which the caller should
+   * treat as a success signal.
+   */
+  async provisionNonce(opts: {
+    multisigAddress: PublicKey;
+    payer: Keypair;
+  }): Promise<{ signature: string; nonceAccount: PublicKey }> {
+    const { instruction, nonceAccount } =
+      await this.buildProvisionNonceInstruction({
+        multisigAddress: opts.multisigAddress,
+        payer: opts.payer.publicKey,
+      });
+    const tx = new Transaction().add(instruction);
+    const signature = await sendAndConfirmTransaction(
+      this.connection,
+      tx,
+      [opts.payer],
+      { commitment: "confirmed" }
+    );
+    return { signature, nonceAccount };
   }
 
   // ==========================================================================
