@@ -1,6 +1,6 @@
 # SSP Solana Multisig
 
-A self-initiating Solana multisig program where the multisig address is **deterministically derived from members + threshold**. Anyone can derive the address before any on-chain action; anyone can pre-fund the vault; only threshold member signatures can initialize.
+A self-initiating Solana multisig program where the multisig address is **deterministically derived from members + threshold**. Anyone can derive the address before any on-chain action; anyone can pre-fund the vault; **registration is permissionless** — no member signatures are required at init because the canonical PDA can only ever store the canonical member set (sha256 binding). Fund safety is enforced by the threshold check on `create_transaction` / `approve_transaction` / `execute_transaction`, not on registration. This mirrors how Bitcoin P2WSH multisig works: the address IS the hash of the script.
 
 Devnet Program ID: `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX`
 
@@ -12,16 +12,16 @@ Here, the multisig PDA is derived from `(sorted_members, threshold)` directly:
 
 ```
 multisig_pda = find_program_address(
-  [b"multisig", hash(sorted_members)[..8], &[threshold]],
+  [b"multisig", sha256(sorted_members), &[threshold]],  // full 32-byte hash
   program_id
 )
 ```
 
 Implications:
 - ✅ Address is knowable BEFORE any on-chain action — pre-fundable
-- ✅ No single creator — init requires threshold member signatures
+- ✅ No creator role exists at any point — registration is permissionless; only the M-of-N threshold check gates funds
 - ✅ Same `(members, threshold)` always yields the same address — no front-run
-- ✅ Front-run protection: an attacker with different config derives a different PDA
+- ✅ Front-run protection: an attacker initing with different members lands at a different PDA (no harm); initing with canonical inputs just pays our rent
 
 ## Architecture
 
@@ -33,8 +33,8 @@ Two PDA types per multisig:
 | **Vault** | SOL + SPL tokens (via ATAs) | SystemProgram (no data) | Funds storage |
 
 ```
-multisig_pda = [b"multisig", hash(members)[..8], &[threshold]]
-vault_pda    = [b"vault", multisig_pda, &[vault_index]]   // vault_index 0..255
+multisig_pda = [b"multisig", sha256(sorted_members), &[threshold]]   // full 32 bytes
+vault_pda    = [b"vault", multisig_pda, &[vault_index]]              // vault_index 0..255
 ```
 
 Users send funds TO the vault address. `SystemProgram::transfer` from the vault works because it's system-owned with empty data. Each multisig supports up to 256 vault sub-accounts (most use cases use only `vault_index = 0`).
@@ -43,7 +43,7 @@ Users send funds TO the vault address. `SystemProgram::transfer` from the vault 
 
 1. **Derive** `(multisig_pda, vault_pda)` off-chain from members + threshold
 2. **Pre-fund** the vault address with SOL or SPL (anyone, before init)
-3. **Init**: threshold members sign canonical init message off-chain; submit `initialize_multisig` tx with one Ed25519 verify ix per signature preceding the program ix. Multisig PDA is created with config.
+3. **Init**: anyone (typically the relay paymaster, or a wallet bundling init into a first send) calls `initialize_multisig(member_hash, threshold, member_count)` with members in `remaining_accounts`. The program verifies `actual_hash(sorted(remaining_accounts)) == member_hash` and stores the canonical config at the PDA. No member signatures involved.
 4. **Propose**: a member calls `create_transaction(vault_index, message)` storing a V0-style transaction message (header + account_keys + compiled instructions + ALT lookups) on a `VaultTransaction` PDA.
 5. **Approve**: each member calls `approve_transaction(index)` once. Approvals accumulate.
 6. **Execute**: when approvals ≥ threshold, anyone calls `execute_transaction(index)`. The program flushes `executed = true` (re-entrancy guard), then iterates compiled instructions and CPIs each one with the **vault PDA as signer** via `invoke_signed`.
@@ -60,8 +60,8 @@ const client = new SolanaMultisigClient(connection, programId);
 const multisig = client.deriveAddress(members, threshold);
 const [vault] = deriveVaultAddress(multisig, 0, programId);
 
-// Pre-fund vault, collect signatures off-chain, then:
-await client.initialize(members, threshold, signatures, payer);
+// Pre-fund vault, then init (permissionless — no member sigs needed):
+await client.initialize(members, threshold, payer);
 
 // Propose a SOL transfer
 const transferIx = SystemProgram.transfer({
@@ -87,13 +87,15 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 
 | Property | Mechanism |
 |---|---|
-| Front-run protection | Multisig PDA is unique per `(members, threshold)`; init requires threshold sigs of canonical message |
+| Front-run protection | Multisig PDA is unique per `(members, threshold)`; an attacker initing with different members lands at a different PDA, no relationship to the canonical vault |
+| Canonical PDA binding | Anchor `init` seeds = `sha256(sorted_members)`; program verifies `actual_hash == member_hash` — the canonical address can only ever store the canonical member set |
 | No deterministic private keys | Pure PDA derivation — no `Keypair::fromSeed` |
-| Init signature replay protection | Ed25519 verification requires `instruction_index = 0xFFFF` (current ix) — prevents binding cryptographic verification to unrelated data |
+| Permissionless init is safe | Init has no signer requirement; funds are gated solely by the threshold check on `create_transaction` / `approve_transaction` / `execute_transaction`. Anyone can pay rent to register the canonical config — they can't subvert it |
 | Re-entrancy | `executed = true` is flushed to on-chain data via `Account::exit()` before the CPI loop |
 | Threshold enforcement | Approvals are counted on-chain; execute requires `approvals.len() >= threshold` |
-| Cross-multisig replay | Init signatures bind `(members, threshold)` into the message |
+| Re-init prevention | Anchor's `init` constraint guarantees the PDA can only be initialized once |
 | Account validation | Anchor's seeds + bump constraints + owner check on every account |
+| Member-set immutability | `members`, `threshold`, `bump` are written once at init; no instruction can modify them post-init |
 
 ## Limits
 
@@ -108,30 +110,24 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 | `MAX_INDEXES_PER_LOOKUP` | 28 | Each (writable + readonly) per ALT |
 | `MAX_COMBINED_ACCOUNTS` | 256 | Solana's u8 index space cap |
 
-### Init-time threshold ceiling
+### Init has no signer ceiling
 
-While the program *stores* up to `MAX_MEMBERS = 20` members, **single-tx
-initialization fits at most ~7 signatures** under Solana's 1232-byte tx cap.
-Each ed25519 init signature contributes 64 (sig) + 32 (pubkey) + 14 (offset
-metadata) = 110 bytes that cannot be ALT-compressed (signatures are payload,
-not account references).
+Init is permissionless — no per-member ed25519 ix is required, so init tx
+size is just the program ix itself (~50 bytes + member-set encoding via
+ALT). **Any `M-of-N` with `N ≤ 30` and any `threshold ≤ N` can init in a
+single tx**, including 30-of-30.
 
-| Configuration | Init tx fits? |
-|---|---|
-| Any `M-of-N` with `M ≤ 7` and `N ≤ 30` | ✅ |
-| `M ≥ 8` (e.g. 8-of-15, 15-of-15, 20-of-20) | ❌ overflows 1232-byte cap |
+### Single-tx bundled send ceiling
 
-**This covers the practical majority of multisig configurations** — 2-of-3,
-3-of-5, 4-of-7, 5-of-9, 7-of-10 all fit. Larger thresholds (8-of-N and
-above) are uncommon in real-world treasury governance but are blocked by
-this design today.
-
-If support requests for `M ≥ 8` materialize, see
-[`docs/BATCHED_INIT_SCOPE.md`](docs/BATCHED_INIT_SCOPE.md) for a prepared
-scope plan that lifts the ceiling via a multi-tx batched init flow without
-compromising the no-creator-key security property. Estimated effort: ~4
-days, fully reversible (existing single-tx init path is preserved for
-`M ≤ 7`).
+The SSP consumer wallet pattern bundles init (optional) + create + approve×M
++ execute + close into ONE V0 transaction. The bottleneck there is tx-level
+signers: each member's ed25519 sig (64 bytes) + their pubkey in the static
+section (32 bytes) = ~96 bytes per signer, which cannot be ALT-compressed.
+Practical ceiling: **~7 signers per bundled tx** (M=7 single-key OR M=3
+dual-key in SSP Enterprise's sol_dual mode). For larger M, the send flow
+splits approvals across separate txs (which is the natural model for
+multi-party enterprise vaults anyway — each signer on their own device,
+signing whenever).
 
 ## Build + test
 
@@ -143,22 +139,32 @@ anchor test               # run the test suite
 
 Tests live in `tests/`:
 - `phase1-basic.ts` — address derivation
-- `phase4-integration.ts` — init flow scenarios (happy paths)
-- `phase4-security.ts` — init failure scenarios (attack vectors)
 - `phase4-unit.ts` — view function unit tests
+- `phase4-integration.ts` — permissionless-init flow scenarios (happy paths)
+- `phase4-security.ts` — permissionless-init security invariants (canonical PDA binding, front-run resistance, arg validation, re-init rejection)
 - `phase5-transactions.ts` — full proposal lifecycle (create / approve / execute)
+- `phase6-extra-coverage.ts` — boundary tests + SPL token transfer
+- `phase7-close-transaction.ts` — proposal close + rent refund
+
+Smoke tests against devnet live in `scripts/`:
+- `devnet-smoke-test.ts` — basic 3-of-5 SOL flow
+- `devnet-spl-smoke-test.ts` — SPL token transfer
+- `devnet-large-smoke-test.ts` — 7-of-10 multisig via ALT
+- `devnet-bundled-singletx-test.ts` — consumer SSP pattern (init + create + approve×2 + execute + close in ONE V0 tx)
+- `devnet-decoupled-init-test.ts` — enterprise pattern (paymaster pre-inits with no members online, members operate later)
+- `devnet-jupiter-format-test.ts` — Jupiter swap fits proposal format
 
 ## How this differs from Squads V4
 
 The actual program-level differentiators (no UX layers, no infrastructure, just protocol):
 
-1. **Truly self-initiating** — multisig PDA = `find_program_address([b"multisig", sha256(sorted_members), &[threshold]])`. Anyone can derive the address before any on-chain action, anyone can pre-fund it, but only threshold member signatures can ever initialize. Squads V4 requires a `creator` who calls `multisig_create_v2` with a random `create_key`; the address is unknowable until creation, and the creator is a single point of trust at setup.
+1. **Truly self-initiating, permissionlessly** — multisig PDA = `find_program_address([b"multisig", sha256(sorted_members), &[threshold]])`. Anyone can derive the address before any on-chain action, anyone can pre-fund it, and **anyone can register it on-chain** — no member signatures required at init. There is no creator role at any point in the multisig's lifecycle. Squads V4 requires a `creator` who calls `multisig_create_v2` with a random `create_key`; the address is unknowable until creation, and the creator is a single point of trust at setup.
 
 2. **No private key exists, ever** — for a given `(members, threshold)`, the address is purely a function of those inputs hashed into PDA seeds. Same config = same address, deterministically. No creator-supplied randomness, no key generation.
 
-3. **No front-running at init** — different configs produce different PDAs, and `initialize_multisig` binds the PDA to the actual member set at init via the 32-byte hash check (`actual_hash == member_hash`). An attacker with different members or threshold derives a different address — they can't squat on a victim's deterministic vault.
+3. **No front-running at init** — different configs produce different PDAs, and `initialize_multisig` binds the PDA to the actual member set at init via the 32-byte hash check (`actual_hash == member_hash`). An attacker initing with different members lands at a different PDA that has no relationship to the canonical vault; an attacker initing with the canonical inputs just pays our rent for us. The canonical address can only ever store the canonical member set.
 
-4. **On-chain Ed25519 verification of the init message** — `initialize_multisig` reads the batched Ed25519 native ix at tx index 0 and harvests verified signers. Init can only succeed when threshold members have actually signed the prefix-domain-separated init message (`SOLANA_MULTISIG_INIT || sha256(sorted_members) || threshold`) off-chain.
+4. **Threshold enforced only at spend, not at registration** — this mirrors Bitcoin P2WSH (the address IS the hash of the script; anyone can fund it; only valid script-satisfying signatures can spend it). Init has no signer requirement at all; `create_transaction` / `approve_transaction` / `execute_transaction` enforce M-of-N. Permissionless registration is what makes M-of-N enterprise vaults trivial — the relay paymaster can register a vault with no member coordination.
 
 5. **ALT-rejection in proposals (Option D)** — `create_transaction` rejects non-empty `address_table_lookups`, preventing executor-side ALT substitution attacks where someone could swap a different ALT at execute time to redirect CPI destinations.
 
@@ -171,9 +177,10 @@ The program-level differences above are what actually distinguish this design.
 ## Status
 
 - ✅ Compiles clean (`cargo check`)
-- ✅ Devnet deployed
-- ✅ End-to-end smoke tests passing (SOL, SPL, 7-of-10, Jupiter format)
-- ✅ 61/61 unit/integration tests passing
+- ✅ Devnet deployed (program ID `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX`, IDL on-chain)
+- ✅ End-to-end smoke tests passing on devnet (SOL, SPL, 7-of-10, Jupiter format, bundled single-tx, decoupled-init)
+- ✅ Anchor test suite passing in isolated phase runs; multi-phase chained runs are flaky due to local validator load (use `bash scripts/run-tests.sh phase4` etc. per phase)
+- ⏳ Mainnet pending (separate keypair; gated on external audit)
 
 ## License
 

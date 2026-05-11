@@ -42,7 +42,7 @@ pub struct Multisig {
 }
 ```
 
-Seed: `[b"multisig", hash(sorted_members)[..8], &[threshold]]`
+Seed: `[b"multisig", sha256(sorted_members), &[threshold]]` (full 32 bytes — truncation would let an attacker find a colliding member set with ~2^64 work and squat pre-funded vault balances)
 
 Created once via `initialize_multisig`. Members and threshold are immutable after init — to "rotate keys" migrate funds to a new multisig with new keys.
 
@@ -130,11 +130,12 @@ Mirrors Solana's MessageV0 minus `recent_blockhash` and `fee_payer`. Account ref
 
 | Threat | Mitigation |
 |---|---|
-| Front-running init | PDA derived from `(members, threshold)`; attacker with different config gets different PDA |
-| Single-creator control | Init requires threshold member sigs of canonical message; no one party controls |
+| Front-running init | PDA derived from `(sorted_members, threshold)`; attacker initing with different members lands at a different PDA (no relationship to canonical vault); attacker initing with canonical inputs just pays our rent |
+| Squatting the canonical address with wrong members | Program verifies `actual_hash(sorted(remaining_accounts)) == member_hash`; Anchor `init` seeds bind the PDA to `member_hash`. Both constraints together = the canonical address can only ever store the canonical member set |
+| Single-creator control | No creator role exists. Init is permissionless. Funds are gated solely by the M-of-N threshold check on `create_transaction` / `approve_transaction` / `execute_transaction` |
 | Pre-fund hijacking | Vault is system-owned + empty data; can't be reassigned externally |
-| Signature forgery via instruction_index manipulation | Ed25519 verify ix MUST have `instruction_index = 0xFFFF` (current ix) |
-| Replay across multisigs | Init message binds `(members, threshold)` |
+| Re-init | Anchor `init` constraint — PDA can only be initialized once |
+| Member-set / threshold tampering post-init | No instruction modifies `members`, `threshold`, or `bump` — they're write-once at init |
 | Re-entrancy | `executed = true` flushed via `Account::exit()` before CPIs |
 | Recursive `create_transaction` from within execute | `multisig` is immutable in `ExecuteTransaction`; outer tx's mut requirement conflicts |
 | Counter collision (concurrent proposals) | `transaction_index` incremented atomically at create |
@@ -143,24 +144,27 @@ Mirrors Solana's MessageV0 minus `recent_blockhash` and `fee_payer`. Account ref
 
 ## Init flow detail
 
-The program verifies signatures on-chain via Solana's native Ed25519 SigVerify program through the Instructions Sysvar:
+Init is **permissionless** — no member signatures required. Tx layout:
 
 ```
-Tx layout:
-  ix[0] = Ed25519 verify (member1's signature)
-  ix[1] = Ed25519 verify (member2's signature)
-  ...
-  ix[N] = initialize_multisig(members, threshold, signatures)
-
-For each signature at sig_index = 0..N-1:
-  - Load ix at sysvar position `sig_index`
-  - Require program_id = ed25519_program::ID
-  - Require signature_instruction_index, public_key_instruction_index,
-    message_instruction_index ALL = 0xFFFF (current ix only)
-  - Validate bytes at offsets match expected (signer, signature, message)
+ix[0] = initialize_multisig(member_hash, threshold, member_count)
+  accounts:
+    multisig:       PDA at seeds=[b"multisig", member_hash, [threshold]] (init)
+    payer:          signer (rent payer — any keypair)
+    system_program: 11111111111111111111111111111111
+  remaining_accounts: the M member pubkeys (sorted; typically via ALT for compact encoding)
 ```
 
-The Ed25519 program performs the actual cryptographic verification. Our code validates the instruction is well-formed and bound to our expected (signer, message) tuple — the `0xFFFF` requirement prevents an attacker from binding a valid signature for a different message to our init.
+The program then:
+1. Reads the M member pubkeys from `remaining_accounts`
+2. Validates `member_count == remaining_accounts.len()` (so account allocation matches data)
+3. Sorts + dedups members
+4. Computes `actual_hash = sha256(sorted_members)` and rejects if `actual_hash != member_hash`
+5. Stores the canonical config at the PDA
+
+The hash check + Anchor's `init` seeds binding together guarantee that the canonical PDA can only ever be registered with the canonical `(sorted_members, threshold)` tuple. Funds at the resulting vault address (derived from the multisig PDA) move only via the threshold-gated proposal flow.
+
+This mirrors how Bitcoin P2WSH multisig works: the address IS the hash of the script (members + threshold), anyone can fund it, only valid script-satisfying signatures can spend it.
 
 ## Execute flow detail
 
