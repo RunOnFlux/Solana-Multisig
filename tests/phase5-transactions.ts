@@ -6,6 +6,7 @@ import {
   PublicKey,
   SystemProgram,
   LAMPORTS_PER_SOL,
+  Transaction,
 } from "@solana/web3.js";
 import { expect } from "chai";
 import { setupMultisigViaAlt } from "./_helpers";
@@ -1007,31 +1008,44 @@ describe("Phase 5: Transaction Lifecycle", () => {
       }
 
       // Swap static[0] and static[1] — should fail AccountMismatch.
-      let threw = false;
-      try {
-        await program.methods
-          .executeTransaction(new anchor.BN(index.toString()))
-          .accountsPartial({
-            multisig,
-            transaction: pda,
-            executor: members[0].publicKey,
-          })
-          .remainingAccounts([
-            { pubkey: recipient.publicKey, isSigner: false, isWritable: true }, // wrong slot
-            { pubkey: vault, isSigner: false, isWritable: true },
-            {
-              pubkey: SystemProgram.programId,
-              isSigner: false,
-              isWritable: false,
-            },
-          ])
-          .signers([members[0]])
-          .rpc();
-      } catch (e: any) {
-        threw = true;
-        expect(String(e)).to.match(/AccountMismatch/);
-      }
-      expect(threw).to.equal(true);
+      // Build the ix via anchor, then go through connection.simulateTransaction
+      // directly. We avoid anchor's `.rpc()` (blockhash race against sustained
+      // validator load) AND its `.simulate()` (which trips on event parsing
+      // when the program returns an error). The raw connection.simulate gives
+      // us the program's logs cleanly.
+      const badIx = await program.methods
+        .executeTransaction(new anchor.BN(index.toString()))
+        .accountsPartial({
+          multisig,
+          transaction: pda,
+          executor: members[0].publicKey,
+        })
+        .remainingAccounts([
+          { pubkey: recipient.publicKey, isSigner: false, isWritable: true }, // wrong slot
+          { pubkey: vault, isSigner: false, isWritable: true },
+          {
+            pubkey: SystemProgram.programId,
+            isSigner: false,
+            isWritable: false,
+          },
+        ])
+        .instruction();
+
+      const badTx = new Transaction().add(badIx);
+      badTx.feePayer = members[0].publicKey;
+      badTx.recentBlockhash = (
+        await provider.connection.getLatestBlockhash()
+      ).blockhash;
+      badTx.partialSign(members[0]);
+
+      const simResult = await provider.connection.simulateTransaction(badTx);
+      expect(simResult.value.err, "expected the tx to fail simulation").to.not.equal(
+        null
+      );
+      const logs = (simResult.value.logs ?? []).join("\n");
+      expect(logs, "expected AccountMismatch in program logs").to.match(
+        /AccountMismatch/
+      );
     });
   });
 });

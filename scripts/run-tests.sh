@@ -45,8 +45,25 @@ FAILED_PHASES=()
 cleanup() {
   if [[ -n "${VALIDATOR_PID:-}" ]] && kill -0 "$VALIDATOR_PID" 2>/dev/null; then
     kill "$VALIDATOR_PID" 2>/dev/null || true
+    # SIGTERM grace then SIGKILL — validator can take a while to flush its
+    # ledger to disk on TERM, and we need port 8899 free for the next phase.
+    for _ in $(seq 1 10); do
+      kill -0 "$VALIDATOR_PID" 2>/dev/null || break
+      sleep 1
+    done
+    kill -9 "$VALIDATOR_PID" 2>/dev/null || true
     wait "$VALIDATOR_PID" 2>/dev/null || true
   fi
+  # Wait until port 8899 is actually free before returning (otherwise the
+  # next phase's validator may fail to bind, or the OS may queue the
+  # previous validator's TIME_WAIT sockets long enough to confuse RPC
+  # confirmation timing).
+  for _ in $(seq 1 15); do
+    if ! lsof -i tcp:8899 -sTCP:LISTEN >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
 }
 trap cleanup EXIT INT TERM
 
