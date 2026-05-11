@@ -110,14 +110,11 @@ async function main() {
   const multisigAddress = client.deriveAddress(memberPubkeys, threshold);
   const vaultPda = client.deriveVaultAddress(multisigAddress, 0);
 
-  const sigs = members
-    .slice(0, threshold)
-    .map((m) => client.createSignature(memberPubkeys, threshold, m));
   const alt = await client.createMembersAddressLookupTable(
     memberPubkeys,
     deployer
   );
-  await client.initialize(memberPubkeys, threshold, sigs, deployer, alt);
+  await client.initialize(memberPubkeys, threshold, deployer, alt);
   log("    Multisig:", multisigAddress.toBase58());
   log("    Vault:   ", vaultPda.toBase58());
 

@@ -1,9 +1,7 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::ed25519_program;
 use anchor_lang::solana_program::hash::hash;
 use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::program::invoke_signed;
-use anchor_lang::solana_program::sysvar::instructions::{self, load_instruction_at_checked};
 
 declare_id!("CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX");
 
@@ -58,29 +56,26 @@ pub mod solana_multisig {
         Ok(vault_pda)
     }
 
-    /// Initialize a self-initiating multisig.
+    /// Initialize a multisig at its deterministic PDA. Permissionless.
     ///
-    /// Members are passed via `remaining_accounts` (typically resolved from
-    /// an Address Lookup Table the client set up beforehand) so they cost
-    /// only ~1 byte each in the transaction instead of 32. This is what
-    /// lets us fit "any 7-of-N" multisigs (single-sig mode) into Solana's
-    /// 1232-byte transaction cap.
+    /// The multisig PDA is `find_program_address(["multisig", member_hash,
+    /// threshold], program_id)` where `member_hash = sha256(sorted_members)`.
+    /// Anyone can call this — there is nothing to steal by front-running
+    /// because (a) the PDA address is fully determined by the inputs, so
+    /// initializing with different inputs lands at a different address and
+    /// cannot squat the canonical vault address, and (b) no funds exist at
+    /// the PDA prior to init. Authorization is enforced by the M-of-N
+    /// threshold on `create_transaction` / `approve_transaction` /
+    /// `execute_transaction`, not on registration.
     ///
-    /// `member_hash` is `sha256(sorted_members)` computed off-chain by the
-    /// client and used to derive the multisig PDA. The function recomputes
-    /// the hash from the actual `remaining_accounts` and rejects if it
-    /// disagrees — this binds the PDA address to the on-chain stored
-    /// member set.
+    /// This mirrors how P2WSH multisig works on Bitcoin: the address IS
+    /// the hash of the script (members + threshold). No init signatures
+    /// are required because there is no way to subvert the canonical
+    /// address without the canonical inputs.
     ///
-    /// SECURITY: each member signs a fixed-size init message off-chain
-    /// (`prefix || sha256(sorted_members) || threshold` — 53 bytes
-    /// regardless of N). The SDK packs all signatures into a single
-    /// Ed25519 native-program instruction at index 0 of the same tx; we
-    /// read it via the Instructions Sysvar, confirm it verified OUR init
-    /// message, and harvest the list of signers.
-    ///
-    /// NO DETERMINISTIC PRIVATE KEYS — only member signatures verified
-    /// on-chain via the native Ed25519 program.
+    /// Members are passed via `remaining_accounts` (typically resolved
+    /// from an Address Lookup Table so each costs ~1 byte instead of 32).
+    /// `member_count` is an ix arg so Anchor can size the account exactly.
     pub fn initialize_multisig<'info>(
         ctx: Context<'_, '_, '_, 'info, InitializeMultisig<'info>>,
         member_hash: [u8; 32],
@@ -128,25 +123,6 @@ pub mod solana_multisig {
         // is at the PDA derived from member_hash + threshold; combined with
         // actual_hash == member_hash, the PDA is bound to the members.
 
-        // Verify Ed25519 signatures (program-side check that the Ed25519
-        // ix verified OUR init message and return the signer list).
-        let init_message = create_initialization_message(&sorted_members, threshold);
-        let signers = verify_ed25519_batch(&ctx.accounts.instructions_sysvar, 0, &init_message)?;
-
-        require!(
-            signers.len() >= threshold as usize,
-            ErrorCode::InsufficientSignatures
-        );
-        for (i, signer) in signers.iter().enumerate() {
-            require!(
-                sorted_members.contains(signer),
-                ErrorCode::UnauthorizedSigner
-            );
-            for prior in &signers[..i] {
-                require!(prior != signer, ErrorCode::DuplicateSignature);
-            }
-        }
-
         // Initialize the multisig account.
         let bump = ctx.bumps.multisig;
         let multisig = &mut ctx.accounts.multisig;
@@ -156,10 +132,9 @@ pub mod solana_multisig {
         multisig.bump = bump;
 
         msg!(
-            "✅ Multisig initialized: {} members, threshold {}, {} signatures verified",
+            "✅ Multisig initialized: {} members, threshold {}",
             members.len(),
             threshold,
-            signers.len()
         );
         msg!("✅ Multisig PDA: {}", ctx.accounts.multisig.key());
 
@@ -658,108 +633,6 @@ pub mod solana_multisig {
 }
 
 // ============================================================================
-// Ed25519 Signature Verification Helper
-// ============================================================================
-
-/// Read the Ed25519 native-program instruction at `ix_index` and confirm it
-/// verified one or more signatures over `expected_message`. Returns the list
-/// of signer pubkeys harvested from the ix's pubkey entries.
-///
-/// The native Ed25519 program already performed the cryptographic check
-/// before our program ran. Our job is to:
-///  - confirm the ix is an Ed25519 program ix,
-///  - confirm each entry's `*_instruction_index` is 0xFFFF (i.e. the bytes
-///    the Ed25519 program verified are in THIS ix, not some unrelated one),
-///  - confirm the message bytes the Ed25519 program verified are exactly
-///    the `expected_message` we want signed (defends against signature
-///    replay across different multisig configurations),
-///  - return the signers so the caller can match them against the member
-///    set and threshold.
-///
-/// The 0xFFFF check is critical: without it, an attacker could craft an
-/// Ed25519 ix whose offsets point into a *different* instruction's data
-/// (e.g. a previous successful init), causing the Ed25519 program to verify
-/// a sig over the OLD message while our byte check pretends it verified
-/// our NEW init message.
-fn verify_ed25519_batch(
-    ix_sysvar: &AccountInfo,
-    ix_index: usize,
-    expected_message: &[u8],
-) -> Result<Vec<Pubkey>> {
-    let ix = load_instruction_at_checked(ix_index, ix_sysvar)
-        .map_err(|_| ErrorCode::InvalidSignature)?;
-    require!(
-        ix.program_id == ed25519_program::ID,
-        ErrorCode::InvalidSignature
-    );
-
-    // Layout (little-endian where multi-byte):
-    //   [0]    num_signatures (u8)
-    //   [1]    padding (u8)
-    //   For each sig (14 bytes starting at offset 2 + i*14):
-    //     [+0]  signature_offset (u16)
-    //     [+2]  signature_instruction_index (u16, 0xFFFF == current ix)
-    //     [+4]  public_key_offset (u16)
-    //     [+6]  public_key_instruction_index (u16)
-    //     [+8]  message_data_offset (u16)
-    //     [+10] message_data_size (u16)
-    //     [+12] message_instruction_index (u16)
-    //   Then the raw bytes: signatures (64 each) + pubkeys (32 each) + messages.
-    let data = &ix.data;
-    require!(data.len() >= 2, ErrorCode::InvalidSignature);
-
-    let num = data[0] as usize;
-    require!(num >= 1, ErrorCode::InvalidSignature);
-
-    let header_size = 2 + 14 * num;
-    require!(data.len() >= header_size, ErrorCode::InvalidSignature);
-
-    let mut signers: Vec<Pubkey> = Vec::with_capacity(num);
-
-    for i in 0..num {
-        let entry = 2 + i * 14;
-
-        let sig_offset = u16::from_le_bytes([data[entry], data[entry + 1]]) as usize;
-        let sig_ix_index = u16::from_le_bytes([data[entry + 2], data[entry + 3]]);
-        let pk_offset = u16::from_le_bytes([data[entry + 4], data[entry + 5]]) as usize;
-        let pk_ix_index = u16::from_le_bytes([data[entry + 6], data[entry + 7]]);
-        let msg_offset = u16::from_le_bytes([data[entry + 8], data[entry + 9]]) as usize;
-        let msg_size = u16::from_le_bytes([data[entry + 10], data[entry + 11]]) as usize;
-        let msg_ix_index = u16::from_le_bytes([data[entry + 12], data[entry + 13]]);
-
-        require!(
-            sig_ix_index == u16::MAX && pk_ix_index == u16::MAX && msg_ix_index == u16::MAX,
-            ErrorCode::InvalidSignature
-        );
-
-        // Bounds for sig + pk + message inside the ix data.
-        require!(data.len() >= sig_offset + 64, ErrorCode::InvalidSignature);
-        require!(data.len() >= pk_offset + 32, ErrorCode::InvalidSignature);
-        require!(
-            data.len() >= msg_offset + msg_size,
-            ErrorCode::InvalidSignature
-        );
-
-        // The bytes the Ed25519 program verified MUST be our expected message.
-        require!(
-            msg_size == expected_message.len(),
-            ErrorCode::InvalidSignature
-        );
-        require!(
-            &data[msg_offset..msg_offset + msg_size] == expected_message,
-            ErrorCode::InvalidSignature
-        );
-
-        // Harvest signer; freshness/dedup against member set is the caller's job.
-        let mut pk_bytes = [0u8; 32];
-        pk_bytes.copy_from_slice(&data[pk_offset..pk_offset + 32]);
-        signers.push(Pubkey::new_from_array(pk_bytes));
-    }
-
-    Ok(signers)
-}
-
-// ============================================================================
 // State Definitions - Phase 1 Architecture
 // ============================================================================
 
@@ -928,13 +801,10 @@ pub struct InitializeMultisig<'info> {
     )]
     pub multisig: Account<'info, Multisig>,
 
+    /// Anyone can pay — init is permissionless. The fee payer of the outer
+    /// tx pays the rent; no signature from any member is required.
     #[account(mut)]
     pub payer: Signer<'info>,
-
-    /// Instructions Sysvar for Ed25519 signature verification
-    /// CHECK: This is the Instructions Sysvar
-    #[account(address = instructions::ID)]
-    pub instructions_sysvar: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
 }
@@ -1153,25 +1023,6 @@ fn compute_proposal_space(message: &TransactionMessage) -> usize {
         .sum::<usize>() // address_table_lookups (actual)
 }
 
-/// Create the fixed-size init message that members sign off-chain.
-///
-/// Layout (53 bytes total, regardless of member count):
-///   [0..20]  domain separator b"SOLANA_MULTISIG_INIT"
-///   [20..52] sha256(sorted_members concatenated raw bytes) — pins the
-///            signature to a specific member set
-///   [52]     threshold
-///
-/// Hashing the member list (rather than including each pubkey verbatim) is
-/// what lets the Ed25519 verify ix stay small enough that big multisigs fit
-/// inside Solana's 1232-byte transaction cap.
-fn create_initialization_message(members: &[Pubkey], threshold: u8) -> Vec<u8> {
-    let mut message = Vec::with_capacity(20 + 32 + 1);
-    message.extend_from_slice(b"SOLANA_MULTISIG_INIT");
-    message.extend_from_slice(&hash_members(members));
-    message.push(threshold);
-    message
-}
-
 // ============================================================================
 // Constants
 // ============================================================================
@@ -1183,9 +1034,9 @@ fn create_initialization_message(members: &[Pubkey], threshold: u8) -> Vec<u8> {
 /// At 30 members the program can hold 15 SSP signers in dual mode
 /// (15 × 2 = 30) while preserving the no-creator-key init flow.
 ///
-/// The init-tx wire-budget ceiling of ~7 ed25519 signatures (single tx)
-/// is unchanged — the bump only enlarges the *member set capacity*, not
-/// the threshold. M ≤ 7 still applies for single-tx init.
+/// Init is permissionless (no per-member ed25519 ix to fit in the tx),
+/// so there is no signer-count ceiling on init — the cap is just the
+/// account space (MAX_MEMBERS × 32 bytes ≈ within rent limits).
 pub const MAX_MEMBERS: usize = 30;
 
 /// Maximum number of static account keys per transaction message.
@@ -1256,20 +1107,8 @@ pub enum ErrorCode {
     #[msg("Duplicate members not allowed")]
     DuplicateMembers,
 
-    #[msg("Insufficient signatures provided")]
-    InsufficientSignatures,
-
     #[msg("Invalid PDA derivation")]
     InvalidPDA,
-
-    #[msg("Signer is not an authorized member")]
-    UnauthorizedSigner,
-
-    #[msg("Duplicate signature from same member")]
-    DuplicateSignature,
-
-    #[msg("Invalid Ed25519 signature - cryptographic verification failed")]
-    InvalidSignature,
 
     #[msg("Member is not authorized for this multisig")]
     UnauthorizedMember,

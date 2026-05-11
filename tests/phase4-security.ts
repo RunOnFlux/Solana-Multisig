@@ -1,35 +1,41 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { SolanaMultisig } from "../target/types/solana_multisig";
-import {
-  Keypair,
-  PublicKey,
-  SystemProgram,
-  TransactionInstruction,
-} from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
 import * as crypto from "crypto";
-import * as nacl from "tweetnacl";
 
 /**
- * Phase 4: Security & Attack Vector Testing
- * Tests all security guarantees and attempts various attacks.
+ * Phase 4: Security & Attack Vector Testing — permissionless init model.
  *
- * Init flow under test:
- *   1. Each member signs `prefix || sha256(sorted_members) || threshold` (53 bytes)
- *   2. SDK packs all signatures into a single batched Ed25519 ix at tx index 0
- *   3. initialize_multisig harvests signers from that Ed25519 ix and validates
- *      threshold + member-set + dedup
+ * Security model under test:
+ *
+ *   - Multisig PDA = find_program_address(
+ *       [b"multisig", sha256(sorted_members), [threshold]], program_id)
+ *     so the PDA address is fully determined by `(sorted_members, threshold)`.
+ *
+ *   - `initialize_multisig(member_hash, threshold, member_count)` is callable
+ *     by anyone (the only signer is `payer`, who pays rent). The program
+ *     recomputes `actual_hash = sha256(sorted(remaining_accounts))` and
+ *     rejects if `actual_hash != member_hash` — this binds the on-chain
+ *     stored member set to the PDA address.
+ *
+ *   - Fund safety is enforced by the threshold check on
+ *     `create_transaction` / `approve_transaction` / `execute_transaction`
+ *     (each verifies signers are members of the multisig; execute requires
+ *     ≥ threshold approvals). Init does not gate funds; it only registers
+ *     the canonical (members, threshold) pair at the canonical PDA.
+ *
+ *   - Pre-funding the vault is safe BEFORE init because nothing can move
+ *     funds without going through create/approve/execute, all of which
+ *     require a registered multisig — and the only multisig that can
+ *     exist at the canonical PDA is the one with the canonical members.
  */
-describe("Security Testing", () => {
+describe("Security Testing (permissionless init)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
-
-  const ED25519_PROGRAM_ID = new PublicKey(
-    "Ed25519SigVerify111111111111111111111111111"
-  );
 
   let member1: Keypair;
   let member2: Keypair;
@@ -61,9 +67,6 @@ describe("Security Testing", () => {
     }
   });
 
-  // ============================================================
-  // Helpers (mirror sdk/src/utils.ts)
-  // ============================================================
   function sortMembers(ks: PublicKey[]): PublicKey[] {
     return [...ks].sort((a, b) => Buffer.compare(a.toBuffer(), b.toBuffer()));
   }
@@ -72,453 +75,313 @@ describe("Security Testing", () => {
     for (const k of ks) h.update(k.toBytes());
     return h.digest();
   }
-  function buildInitMessage(ks: PublicKey[], t: number): Buffer {
-    return Buffer.concat([
-      Buffer.from("SOLANA_MULTISIG_INIT"),
-      hashMembers(sortMembers(ks)),
-      Buffer.from([t]),
-    ]);
-  }
-  function deriveMultisigPda(ks: PublicKey[], t: number): PublicKey {
-    const sorted = sortMembers(ks);
-    const memberHash = hashMembers(sorted);
-    const [pda] = PublicKey.findProgramAddressSync(
+
+  async function derivePda(
+    memberHash: Buffer,
+    t: number
+  ): Promise<[PublicKey, number]> {
+    return PublicKey.findProgramAddressSync(
       [Buffer.from("multisig"), memberHash, Buffer.from([t])],
       program.programId
     );
-    return pda;
-  }
-  /** Pack {signer, signature} pairs into one batched Ed25519 ix over `message`. */
-  function makeBatchedEd25519Ix(
-    sigs: Array<{ signer: PublicKey; signature: Uint8Array }>,
-    message: Buffer
-  ): TransactionInstruction {
-    const n = sigs.length;
-    const headerSize = 2 + 14 * n;
-    const sigsStart = headerSize;
-    const pubkeysStart = sigsStart + n * 64;
-    const messageStart = pubkeysStart + n * 32;
-    const data = Buffer.alloc(messageStart + message.length);
-
-    data.writeUInt8(n, 0);
-    data.writeUInt8(0, 1);
-    for (let i = 0; i < n; i++) {
-      const entry = 2 + i * 14;
-      const sigOffset = sigsStart + i * 64;
-      const pubkeyOffset = pubkeysStart + i * 32;
-      data.writeUInt16LE(sigOffset, entry);
-      data.writeUInt16LE(0xffff, entry + 2);
-      data.writeUInt16LE(pubkeyOffset, entry + 4);
-      data.writeUInt16LE(0xffff, entry + 6);
-      data.writeUInt16LE(messageStart, entry + 8);
-      data.writeUInt16LE(message.length, entry + 10);
-      data.writeUInt16LE(0xffff, entry + 12);
-      Buffer.from(sigs[i].signature).copy(data, sigOffset);
-      Buffer.from(sigs[i].signer.toBytes()).copy(data, pubkeyOffset);
-    }
-    message.copy(data, messageStart);
-
-    return new TransactionInstruction({
-      keys: [],
-      programId: ED25519_PROGRAM_ID,
-      data,
-    });
-  }
-  function signMsg(msg: Buffer, kp: Keypair): Uint8Array {
-    return nacl.sign.detached(msg, kp.secretKey);
   }
 
-  // ============================================================
-  // Attacks
-  // ============================================================
-  describe("🔒 Attack Vector 1: Front-Running Attack", () => {
-    it("should prevent front-running with different members", async () => {
-      console.log(
-        "\n🚨 Testing: Attacker tries to front-run with different members"
-      );
-      const attackerMembers = [
-        attacker.publicKey,
+  // ------------------------------------------------------------
+  // Canonical PDA ↔ canonical members
+  // ------------------------------------------------------------
+
+  describe("Canonical PDA binding", () => {
+    it("rejects init when member_hash arg doesn't match remaining_accounts hash", async () => {
+      const canonical = sortMembers(members);
+      const canonicalHash = hashMembers(canonical);
+      const [pda] = await derivePda(canonicalHash, threshold);
+
+      // Attacker passes the canonical hash (to land at the canonical PDA)
+      // but tries to substitute their own pubkey into the member set.
+      const tampered = sortMembers([
+        member1.publicKey,
         member2.publicKey,
-        member3.publicKey,
-      ];
-      const legit = await program.methods
-        .deriveAddress(sortMembers(members), threshold)
-        .view();
-      const evil = await program.methods
-        .deriveAddress(sortMembers(attackerMembers), threshold)
-        .view();
-      console.log(`   ✅ Legitimate address: ${legit.toString()}`);
-      console.log(`   ✅ Attacker address: ${evil.toString()}`);
-      expect(legit.toString()).to.not.equal(evil.toString());
-      console.log(
-        `   ✅ Addresses are different - attacker cannot steal pre-funded address!`
-      );
-    });
+        attacker.publicKey, // ← swapped in
+      ]);
 
-    it("should prevent front-running with different threshold", async () => {
-      console.log(
-        "\n🚨 Testing: Attacker tries to initialize with different threshold"
-      );
-      const a = await program.methods
-        .deriveAddress(sortMembers(members), 2)
-        .view();
-      const b = await program.methods
-        .deriveAddress(sortMembers(members), 3)
-        .view();
-      expect(a.toString()).to.not.equal(b.toString());
-      console.log(`   ✅ 2-of-3 address: ${a.toString()}`);
-      console.log(`   ✅ 3-of-3 address: ${b.toString()}`);
-      console.log(`   ✅ Cannot change threshold to steal funds!`);
-    });
-  });
-
-  describe("🔒 Attack Vector 2: Signature Forgery", () => {
-    it("should reject a forged signature (Ed25519 program rejects)", async () => {
-      console.log("\n🚨 Testing: Attacker tries to forge signatures");
-      const sortedMembers = sortMembers(members);
-      const message = buildInitMessage(members, threshold);
-      // Attacker signs with their own key, but we claim the pubkey is member1.
-      // The Ed25519 program will fail crypto verification and abort the tx.
-      const forgedSig = signMsg(message, attacker);
-      const ed25519Ix = makeBatchedEd25519Ix(
-        [{ signer: member1.publicKey, signature: forgedSig }],
-        message
-      );
-      const multisig = deriveMultisigPda(members, threshold);
-
-      let threw = false;
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({
-            multisig,
-            payer: attacker.publicKey,
-          })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .preInstructions([ed25519Ix])
-          .signers([attacker])
-          .rpc();
-      } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly rejected forged signature`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-      }
-      expect(threw).to.equal(true);
-    });
-
-    it("should reject signatures from non-members", async () => {
-      console.log("\n🚨 Testing: Non-member tries to sign");
-      const sortedMembers = sortMembers(members);
-      const message = buildInitMessage(members, threshold);
-      // Attacker's signature is cryptographically valid for attacker's pubkey,
-      // but the program rejects because attacker is not in `members`.
-      const sig = signMsg(message, attacker);
-      const ed25519Ix = makeBatchedEd25519Ix(
-        [{ signer: attacker.publicKey, signature: sig }],
-        message
-      );
-      const multisig = deriveMultisigPda(members, threshold);
-
-      let threw = false;
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({
-            multisig,
-            payer: attacker.publicKey,
-          })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .preInstructions([ed25519Ix])
-          .signers([attacker])
-          .rpc();
-      } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly rejected non-member signature`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-      }
-      expect(threw).to.equal(true);
-    });
-  });
-
-  describe("🔒 Attack Vector 3: Insufficient Signatures", () => {
-    it("should reject initialization with fewer than threshold signatures", async () => {
-      console.log(
-        "\n🚨 Testing: Trying to initialize with 1 signature when threshold is 2"
-      );
-      const sortedMembers = sortMembers(members);
-      const message = buildInitMessage(members, threshold);
-      const sig = signMsg(message, member1);
-      const ed25519Ix = makeBatchedEd25519Ix(
-        [{ signer: member1.publicKey, signature: sig }],
-        message
-      );
-      const multisig = deriveMultisigPda(members, threshold);
-
-      let threw = false;
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({
-            multisig,
-            payer: member1.publicKey,
-          })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .preInstructions([ed25519Ix])
-          .signers([member1])
-          .rpc();
-      } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly rejected: need ${threshold}, got 1`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-      }
-      expect(threw).to.equal(true);
-    });
-  });
-
-  describe("🔒 Attack Vector 4: Duplicate Signatures", () => {
-    it("should reject duplicate signatures from same member", async () => {
-      console.log("\n🚨 Testing: Member tries to sign twice");
-      const sortedMembers = sortMembers(members);
-      const message = buildInitMessage(members, threshold);
-      const sig1 = signMsg(message, member1);
-      // Same member appears twice in the Ed25519 batch.
-      const ed25519Ix = makeBatchedEd25519Ix(
-        [
-          { signer: member1.publicKey, signature: sig1 },
-          { signer: member1.publicKey, signature: sig1 },
-        ],
-        message
-      );
-      const multisig = deriveMultisigPda(members, threshold);
-
-      let threw = false;
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({
-            multisig,
-            payer: member1.publicKey,
-          })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .preInstructions([ed25519Ix])
-          .signers([member1])
-          .rpc();
-      } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly rejected duplicate signature`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-      }
-      expect(threw).to.equal(true);
-    });
-  });
-
-  describe("🔒 Attack Vector 5b: Missing Ed25519 ix", () => {
-    it("rejects init when no Ed25519 ix is at tx index 0", async () => {
-      console.log("\n🚨 Testing: Init without the prefixed Ed25519 verify ix");
-      const sortedMembers = sortMembers(members);
-      const multisig = deriveMultisigPda(members, threshold);
-
-      // No .preInstructions(...) — the program ix lands at index 0, so
-      // verify_ed25519_batch reads it, sees program_id != ed25519_program,
-      // and rejects with InvalidSignature.
-      let threw = false;
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({ multisig, payer: member1.publicKey })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .signers([member1])
-          .rpc();
-      } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly rejected with no Ed25519 ix`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-      }
-      expect(threw).to.equal(true);
-    });
-  });
-
-  describe("🔒 Attack Vector 5c: Cross-multisig signature replay", () => {
-    it("rejects an Ed25519 ix that signed for a DIFFERENT multisig", async () => {
-      console.log("\n🚨 Testing: Replay signatures from another multisig");
-      // Build a SECOND (sibling) multisig configuration. Members A,D,E sign
-      // for it, but the attacker tries to use those signatures to init the
-      // ORIGINAL multisig (members 1,2,3). Different members → different
-      // hash → different init_message → byte check fails.
-      const memberA = member1; // overlaps with original
-      const memberD = Keypair.generate();
-      const memberE = Keypair.generate();
-      const altMembers = [
-        memberA.publicKey,
-        memberD.publicKey,
-        memberE.publicKey,
-      ];
-      const altSorted = sortMembers(altMembers);
-      const altMessage = buildInitMessage(altMembers, threshold);
-
-      // Two valid sigs for the OTHER multisig.
-      const altEd25519Ix = makeBatchedEd25519Ix(
-        [
-          {
-            signer: memberA.publicKey,
-            signature: signMsg(altMessage, memberA),
-          },
-          {
-            signer: memberD.publicKey,
-            signature: signMsg(altMessage, memberD),
-          },
-        ],
-        altMessage
-      );
-
-      // Try to use them to init the ORIGINAL multisig.
-      const originalMultisig = deriveMultisigPda(members, threshold);
-      const originalSorted = sortMembers(members);
-
-      let threw = false;
+      let err: unknown = null;
       try {
         await program.methods
           .initializeMultisig(
-            Array.from(hashMembers(originalSorted)),
+            Array.from(canonicalHash),
             threshold,
-            originalSorted.length
+            tampered.length
           )
           .accountsPartial({
-            multisig: originalMultisig,
-            payer: member1.publicKey,
+            multisig: pda,
+            payer: attacker.publicKey,
+            systemProgram: SystemProgram.programId,
           })
           .remainingAccounts(
-            originalSorted.map((pubkey) => ({
-              pubkey,
+            tampered.map((pk) => ({
+              pubkey: pk,
               isSigner: false,
               isWritable: false,
             }))
           )
-          .preInstructions([altEd25519Ix])
+          .signers([attacker])
+          .rpc();
+      } catch (e) {
+        err = e;
+      }
+      expect(err, "tamper attempt should fail").to.not.equal(null);
+      expect(String(err)).to.match(/InvalidPDA|seeds constraint|ConstraintSeeds/i);
+      console.log("   ✅ tampered member set rejected at canonical PDA");
+    });
+
+    it("front-running with the CANONICAL inputs is harmless (state ends identical)", async () => {
+      const canonical = sortMembers(members);
+      const canonicalHash = hashMembers(canonical);
+      const [pda] = await derivePda(canonicalHash, threshold);
+
+      // Attacker pays rent and initializes with the correct (canonical)
+      // member set. This is exactly what we want — no harm done; in fact
+      // they paid the rent for us.
+      await program.methods
+        .initializeMultisig(
+          Array.from(canonicalHash),
+          threshold,
+          canonical.length
+        )
+        .accountsPartial({
+          multisig: pda,
+          payer: attacker.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(
+          canonical.map((pk) => ({
+            pubkey: pk,
+            isSigner: false,
+            isWritable: false,
+          }))
+        )
+        .signers([attacker])
+        .rpc();
+
+      const acc = await program.account.multisig.fetch(pda);
+      expect(acc.threshold).to.equal(threshold);
+      expect(acc.members.length).to.equal(canonical.length);
+      expect(
+        acc.members.map((p: PublicKey) => p.toBase58()).sort()
+      ).to.deep.equal(canonical.map((p) => p.toBase58()).sort());
+
+      // Attempt to re-init must fail (account already exists).
+      let reinitErr: unknown = null;
+      try {
+        await program.methods
+          .initializeMultisig(
+            Array.from(canonicalHash),
+            threshold,
+            canonical.length
+          )
+          .accountsPartial({
+            multisig: pda,
+            payer: member1.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts(
+            canonical.map((pk) => ({
+              pubkey: pk,
+              isSigner: false,
+              isWritable: false,
+            }))
+          )
           .signers([member1])
           .rpc();
       } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly rejected cross-multisig replay`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-        // Suppress unused warning for altSorted (kept for parallel-structure clarity)
-        void altSorted;
+        reinitErr = e;
       }
-      expect(threw).to.equal(true);
-    });
-  });
-
-  describe("🔒 Attack Vector 5: Re-initialization Attack", () => {
-    it("should prevent re-initialization of existing multisig", async () => {
-      console.log("\n🚨 Testing: Trying to re-initialize an existing multisig");
-      const sortedMembers = sortMembers(members);
-      const message = buildInitMessage(members, threshold);
-      const ed25519Ix = makeBatchedEd25519Ix(
-        [
-          { signer: member1.publicKey, signature: signMsg(message, member1) },
-          { signer: member2.publicKey, signature: signMsg(message, member2) },
-        ],
-        message
+      expect(reinitErr, "re-init must fail").to.not.equal(null);
+      console.log(
+        "   ✅ front-run with canonical inputs → canonical state stored; re-init blocked"
       );
-      const multisig = deriveMultisigPda(members, threshold);
+    });
 
-      // First init may succeed or may already exist from a previous test run.
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({
-            multisig,
-            payer: member1.publicKey,
-          })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .preInstructions([ed25519Ix])
-          .signers([member1])
-          .rpc();
-        console.log(`   ✅ First initialization succeeded`);
-      } catch {
-        console.log(`   ℹ️  Multisig may already exist`);
-      }
+    it("attacker initing with their own members lands at a DIFFERENT PDA — does not affect canonical vault", async () => {
+      // The attacker's "multisig" is at a totally different address and
+      // has no relationship to the canonical (member1, member2, member3)
+      // vault. Their init succeeds — but harmlessly.
+      const attackerMembers = sortMembers([
+        attacker.publicKey,
+        Keypair.generate().publicKey,
+      ]);
+      const attackerHash = hashMembers(attackerMembers);
+      const [attackerPda] = await derivePda(attackerHash, 1);
 
-      // Second init must fail (account already initialized).
-      let threw = false;
-      try {
-        await program.methods
-          .initializeMultisig(Array.from(hashMembers(sortedMembers)), threshold, sortedMembers.length)
-          .accountsPartial({
-            multisig,
-            payer: member1.publicKey,
-          })
-          .remainingAccounts(
-            sortedMembers.map((pubkey) => ({
-              pubkey,
-              isSigner: false,
-              isWritable: false,
-            }))
-          )
-          .preInstructions([ed25519Ix])
-          .signers([member1])
-          .rpc();
-      } catch (e) {
-        threw = true;
-        console.log(`   ✅ Correctly prevented re-initialization`);
-        console.log(`   ✅ Error: ${(e as Error).message.split("\n")[0]}`);
-      }
-      expect(threw).to.equal(true);
+      const canonicalHash = hashMembers(sortMembers(members));
+      const [canonicalPda] = await derivePda(canonicalHash, threshold);
+
+      expect(attackerPda.toBase58()).to.not.equal(canonicalPda.toBase58());
+
+      await program.methods
+        .initializeMultisig(Array.from(attackerHash), 1, attackerMembers.length)
+        .accountsPartial({
+          multisig: attackerPda,
+          payer: attacker.publicKey,
+          systemProgram: SystemProgram.programId,
+        })
+        .remainingAccounts(
+          attackerMembers.map((pk) => ({
+            pubkey: pk,
+            isSigner: false,
+            isWritable: false,
+          }))
+        )
+        .signers([attacker])
+        .rpc();
+      console.log(
+        "   ✅ attacker multisig lives at a separate address — canonical vault untouched"
+      );
     });
   });
 
-  describe("✅ Security Guarantees Verification", () => {
-    it("verifies all security properties", async () => {
-      console.log("\n🔐 Security Checklist:");
-      console.log("   ✅ No deterministic private keys generated");
-      console.log("   ✅ All signatures verified on-chain");
-      console.log("   ✅ PDA derivation cannot be manipulated");
-      console.log("   ✅ Re-initialization prevented");
-      console.log("   ✅ No single point of failure");
-      console.log("   ✅ Member authorization enforced");
-      console.log("   ✅ Threshold requirement enforced");
-      console.log("   ✅ Front-running impossible");
-      console.log("   ✅ Duplicate signatures rejected");
-      console.log("   ✅ Signature forgery prevented");
-      // Sanity: keep SystemProgram referenced so eslint/tsc don't complain
-      // about the unused import in case future tests need it.
-      expect(SystemProgram.programId.toBase58()).to.have.length.greaterThan(0);
+  // ------------------------------------------------------------
+  // Argument validation
+  // ------------------------------------------------------------
+
+  describe("Init argument validation", () => {
+    it("rejects threshold = 0", async () => {
+      const newMembers = sortMembers([
+        Keypair.generate().publicKey,
+        Keypair.generate().publicKey,
+      ]);
+      const newHash = hashMembers(newMembers);
+      const [pda] = await derivePda(newHash, 0);
+
+      let err: unknown = null;
+      try {
+        await program.methods
+          .initializeMultisig(Array.from(newHash), 0, newMembers.length)
+          .accountsPartial({
+            multisig: pda,
+            payer: member1.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts(
+            newMembers.map((pk) => ({
+              pubkey: pk,
+              isSigner: false,
+              isWritable: false,
+            }))
+          )
+          .signers([member1])
+          .rpc();
+      } catch (e) {
+        err = e;
+      }
+      expect(err, "threshold=0 must fail").to.not.equal(null);
+      expect(String(err)).to.match(/InvalidThreshold/i);
+    });
+
+    it("rejects threshold > member count", async () => {
+      const newMembers = sortMembers([
+        Keypair.generate().publicKey,
+        Keypair.generate().publicKey,
+      ]);
+      const newHash = hashMembers(newMembers);
+      const overThreshold = 5;
+      const [pda] = await derivePda(newHash, overThreshold);
+
+      let err: unknown = null;
+      try {
+        await program.methods
+          .initializeMultisig(
+            Array.from(newHash),
+            overThreshold,
+            newMembers.length
+          )
+          .accountsPartial({
+            multisig: pda,
+            payer: member1.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts(
+            newMembers.map((pk) => ({
+              pubkey: pk,
+              isSigner: false,
+              isWritable: false,
+            }))
+          )
+          .signers([member1])
+          .rpc();
+      } catch (e) {
+        err = e;
+      }
+      expect(err, "threshold > N must fail").to.not.equal(null);
+      expect(String(err)).to.match(/InvalidThreshold/i);
+    });
+
+    it("rejects duplicate members", async () => {
+      const dup = Keypair.generate().publicKey;
+      const dupMembers = sortMembers([dup, dup]);
+      const dupHash = hashMembers(dupMembers);
+      const [pda] = await derivePda(dupHash, 2);
+
+      let err: unknown = null;
+      try {
+        await program.methods
+          .initializeMultisig(Array.from(dupHash), 2, dupMembers.length)
+          .accountsPartial({
+            multisig: pda,
+            payer: member1.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts(
+            dupMembers.map((pk) => ({
+              pubkey: pk,
+              isSigner: false,
+              isWritable: false,
+            }))
+          )
+          .signers([member1])
+          .rpc();
+      } catch (e) {
+        err = e;
+      }
+      expect(err, "duplicate members must fail").to.not.equal(null);
+      expect(String(err)).to.match(/DuplicateMembers/i);
+    });
+
+    it("rejects mismatched member_count arg vs remaining_accounts length", async () => {
+      const newMembers = sortMembers([
+        Keypair.generate().publicKey,
+        Keypair.generate().publicKey,
+      ]);
+      const newHash = hashMembers(newMembers);
+      const [pda] = await derivePda(newHash, 1);
+
+      let err: unknown = null;
+      try {
+        await program.methods
+          .initializeMultisig(
+            Array.from(newHash),
+            1,
+            (newMembers.length + 1) as number // lie about count
+          )
+          .accountsPartial({
+            multisig: pda,
+            payer: member1.publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .remainingAccounts(
+            newMembers.map((pk) => ({
+              pubkey: pk,
+              isSigner: false,
+              isWritable: false,
+            }))
+          )
+          .signers([member1])
+          .rpc();
+      } catch (e) {
+        err = e;
+      }
+      expect(err, "member_count mismatch must fail").to.not.equal(null);
+      expect(String(err)).to.match(/InvalidMemberCount/i);
     });
   });
 });

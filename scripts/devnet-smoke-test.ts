@@ -81,28 +81,21 @@ async function main() {
   log("\n[3] Derived multisig:", multisigAddress.toBase58());
   log("    Vault PDA:        ", vaultPda.toBase58());
 
-  // 4. Each of `threshold` members signs the init message
-  const sigs = members
-    .slice(0, threshold)
-    .map((m) => client.createSignature(memberPubkeys, threshold, m));
-  log("\n[4] Collected", sigs.length, "init signatures");
-
-  // 5. Create ALT (needed by SDK init path)
+  // 4. Create ALT (needed by SDK init path for larger multisigs)
   const alt = await client.createMembersAddressLookupTable(
     memberPubkeys,
     deployer
   );
-  log("\n[5] ALT created:", alt.toBase58());
+  log("\n[4] ALT created:", alt.toBase58());
 
-  // 6. Initialize the multisig on-chain
+  // 5. Initialize the multisig on-chain (permissionless — no member sigs).
   const initResult = await client.initialize(
     memberPubkeys,
     threshold,
-    sigs,
     deployer,
     alt
   );
-  log("\n[6] Multisig initialized");
+  log("\n[5] Multisig initialized");
   log("    sig:", initResult.signature);
 
   // 7. Prefund the vault with 0.01 SOL

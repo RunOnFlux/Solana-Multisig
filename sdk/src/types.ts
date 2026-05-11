@@ -1,17 +1,6 @@
 import { PublicKey } from "@solana/web3.js";
 
 /**
- * Signature data for multisig initialization
- * Must match the Rust SignatureData struct
- */
-export interface SignatureData {
-  /** The member who created this signature */
-  signer: PublicKey;
-  /** Ed25519 signature (64 bytes) */
-  signature: Uint8Array;
-}
-
-/**
  * Multisig configuration
  */
 export interface MultisigConfig {

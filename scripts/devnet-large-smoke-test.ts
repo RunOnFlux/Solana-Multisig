@@ -90,30 +90,23 @@ async function main() {
   log("\n[3] Derived multisig:", multisigAddress.toBase58());
   log("    Vault PDA:        ", vaultPda.toBase58());
 
-  // 4. Threshold members sign the init message
-  const sigs = members
-    .slice(0, THRESHOLD)
-    .map((m) => client.createSignature(memberPubkeys, THRESHOLD, m));
-  log(`\n[4] Collected ${sigs.length} init signatures`);
-
-  // 5. Create ALT (members + system accounts → routes pubkeys via lookup so
+  // 4. Create ALT (members + SystemProgram → routes pubkeys via lookup so
   //    the V0 outer tx stays under 1232 bytes)
   const alt = await client.createMembersAddressLookupTable(
     memberPubkeys,
     deployer
   );
-  log("\n[5] ALT created:", alt.toBase58());
+  log("\n[4] ALT created:", alt.toBase58());
 
-  // 6. Init the multisig — this is THE stress test (7 sigs + 10 members
-  //    with ALT compaction must fit in a single V0 tx)
+  // 5. Init the multisig (permissionless — no member sigs needed; ALT
+  //    just compacts the 10 member pubkeys into ~1 byte each).
   const initResult = await client.initialize(
     memberPubkeys,
     THRESHOLD,
-    sigs,
     deployer,
     alt
   );
-  log("\n[6] Multisig initialized via ALT-compacted V0 tx");
+  log("\n[5] Multisig initialized via ALT-compacted V0 tx");
   log("    sig:", initResult.signature);
 
   // 7. Prefund the vault

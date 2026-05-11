@@ -2,7 +2,7 @@
 
 TypeScript SDK for the **SSP Solana Multisig** program — a self-initiating M-of-N multisig on Solana where the multisig address is deterministically derived from `(members, threshold)` and anyone can pre-fund it before initialization.
 
-> **Self-initiating** means: anyone can derive the multisig address before any on-chain action, anyone can send funds to it, but **only threshold member signatures can initialize it**. There is no "creator" who controls when or whether the multisig is created — the address itself is owned by the cryptographic configuration.
+> **Self-initiating** means: there is no creator/admin role at any point in the multisig's lifecycle. The multisig PDA is fully determined by `(sorted_members, threshold)`, so the canonical address can only ever be registered with the canonical member set. Init is **permissionless** — anyone can pay the rent to register the canonical config — but fund safety is enforced by the M-of-N threshold check on every transaction proposal/approval/execution, never on registration. This mirrors how P2WSH multisig works on Bitcoin: the address IS the hash of the script.
 
 ## Install
 
@@ -52,19 +52,13 @@ console.log("Vault (deposit address):", vault.toBase58());
 // 3. Pre-fund the vault (anyone can — vault is just a system PDA)
 //    ... user sends SOL to `vault` ...
 
-// 4. Each of `threshold` members signs the init message off-chain
-const sigs = [m1, m2].map((m) =>
-  client.createSignature(members, threshold, m),
-);
-
-// 5. Create an ALT for >5 members (skip for tiny multisigs)
+// 4. (Optional) ALT for >5 members so each member pubkey costs ~1 byte in the init tx
 const alt = await client.createMembersAddressLookupTable(members, payer);
 
-// 6. Submit the init tx
+// 5. Submit the init tx — permissionless, no member signatures required
 const { multisigAddress, signature } = await client.initialize(
   members,
   threshold,
-  sigs,
   payer,
   alt,
 );
@@ -144,10 +138,8 @@ See [`examples/full-flow.ts`](./examples/full-flow.ts) for a complete end-to-end
 |---|---|
 | `deriveAddress(members, threshold)` | Compute the multisig PDA off-chain. |
 | `deriveVaultAddress(multisig, vaultIndex)` | Compute the vault PDA (deposit address) off-chain. |
-| `createSignature(members, threshold, member)` | Off-chain Ed25519 signature over the init message — one per member. |
-| `verifySignatures(members, threshold, sigs)` | Client-side validation before submitting. |
 | `createMembersAddressLookupTable(members, payer)` | Create an ALT for member-list compaction (needed for >5 members under the 1232-byte tx cap). |
-| `initialize(members, threshold, sigs, payer, alt)` | Submit the init tx with batched Ed25519 verification. |
+| `initialize(members, threshold, payer, alt?)` | Submit the permissionless init tx. Anyone can call. |
 | `preFund(address, amount, funder)` | Convenience helper to send SOL to a vault. |
 | `createTransaction(multisig, vaultIndex, instructions, creator)` | Propose a transaction the multisig should execute. |
 | `createTransactionFromMessage(multisig, vaultIndex, message, creator)` | Propose with a pre-built V0 message (for SPL, ALT-using complex flows, etc.). |
@@ -163,22 +155,22 @@ For bundling multiple program calls into a single Solana transaction (e.g., for 
 | Method | Returns | Use for |
 |---|---|---|
 | `predictNextTransactionPda(multisig, currentIndex)` | `{ transactionAddress, transactionIndex }` | Compute the next proposal PDA before fetching it on-chain. |
-| `buildInitializeMultisigInstruction(opts)` | `{ instruction, multisigAddress, bump }` | Bundle init into a multi-ix tx alongside `createBatchedEd25519Instruction`. |
+| `buildInitializeMultisigInstruction(opts)` | `{ instruction, multisigAddress, bump }` | Bundle the (permissionless) init ix into a multi-ix tx — e.g. silently included on first send. |
 | `buildCreateTransactionInstruction(opts)` | `{ instruction, transactionAddress, transactionIndex }` | Build a proposal ix without auto-sending. |
 | `buildApproveTransactionInstruction(opts)` | `TransactionInstruction` | Build an approval ix; member must be a tx-level signer. |
 | `buildExecuteTransactionInstruction(opts)` | `TransactionInstruction` | Build an execute ix with explicit `remainingAccounts`. |
 
-Example — 2-of-2 single-tx send (init + create + 2 approvals + execute, signed by both members and broadcast atomically):
+Example — 2-of-2 single-tx send (optional permissionless init + create + 2 approvals + execute, signed by both members and broadcast atomically):
 
 ```typescript
+// Only include the init ix on first send (when the multisig PDA hasn't
+// been registered yet). No member signatures needed for init.
 const { instruction: initIx, multisigAddress } =
   await client.buildInitializeMultisigInstruction({
     members: [walletPubkey, keyPubkey],
     threshold: 2,
     payer: walletPubkey,
   });
-
-const ed25519Ix = createBatchedEd25519Instruction(initSignatures, initMessage);
 
 const { instruction: createIx, transactionAddress, transactionIndex } =
   await client.buildCreateTransactionInstruction({
@@ -203,7 +195,7 @@ const executeIx = await client.buildExecuteTransactionInstruction({
 
 // Bundle into one tx; both wallet and key partial-sign before broadcast.
 const tx = new Transaction().add(
-  ed25519Ix, initIx, createIx, approveWalletIx, approveKeyIx, executeIx,
+  initIx, createIx, approveWalletIx, approveKeyIx, executeIx,
 );
 tx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
 tx.feePayer = walletPubkey;
@@ -217,22 +209,22 @@ const sig = await connection.sendRawTransaction(tx.serialize());
 
 | | Value |
 |---|---|
-| MAX_MEMBERS | 20 |
+| MAX_MEMBERS | 30 |
 | MAX_TX_ACCOUNT_KEYS | 128 |
 | MAX_TX_INSTRUCTIONS | 16 |
 | MAX_INSTRUCTION_ACCOUNTS | 64 |
 | MAX_INSTRUCTION_DATA_LEN | 1024 bytes |
-| Max raw-signature single-tx init (no ALT) | ~5 members |
-| Max raw-signature single-tx init (ALT) | 7 members |
 
-For configurations beyond the single-tx ceiling, the client will reject with a clear error.
+Init has no signer-count ceiling now that it's permissionless (no ed25519 ix to fit in the tx); the cap on members is just the account space.
 
 ## Security model
 
 - **No deterministic private keys** — the multisig PDA has no associated keypair. Funds can only move via `(threshold)` member signatures verified on-chain.
-- **Self-initiating** — anyone can fund a derived address before init; address is bound to `(members, threshold)` via 32-byte sha256 in the PDA seeds.
+- **No creator/admin role** — there is no privileged key controlling the multisig. Self-initiating in the literal sense: the configuration IS the address.
+- **Canonical PDA binding** — multisig PDA seeds include the full 32-byte sha256 of sorted members + threshold; the program rejects any init whose `remaining_accounts` don't hash to the `member_hash` argument. The canonical address can only be registered with the canonical member set.
+- **Permissionless init is safe** — anyone can pay rent to register the canonical config (front-running it just helps us). They can't subvert the member set; an init with non-canonical members lands at a different PDA that has no relationship to the canonical vault.
+- **Threshold gate on every move** — `create_transaction` requires a member signer, `approve_transaction` requires a member signer with dedup, `execute_transaction` requires `approvals.len() ≥ threshold`. Init does not gate funds.
 - **No ALT in proposals** — `create_transaction` rejects non-empty `address_table_lookups` in proposal messages, preventing ALT-substitution attacks where an executor swaps a different ALT at execute time.
-- **Cross-multisig signature replay protected** — init message includes the specific member-set hash, so signatures from one multisig can't be replayed against another.
 - **Re-initialization prevented** — `init` constraint guarantees the PDA can only be initialized once.
 
 ## Status

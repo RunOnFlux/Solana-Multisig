@@ -80,21 +80,17 @@ async function main() {
   );
 
   // ========================================================================
-  // 3. Submit the init tx (SDK builds + sends Ed25519 ixs + initialize_multisig)
+  // 3. Submit the init tx — permissionless registration of the canonical
+  //    (members, threshold) at the canonical PDA. No member signatures
+  //    required; the PDA is fully determined by the inputs, so attempting
+  //    to init with different members lands at a different PDA.
   // ========================================================================
-  // Each threshold member signs the canonical init message off-chain.
-  const sigs = [
-    client.createSignature(members, threshold, member1),
-    client.createSignature(members, threshold, member2),
-  ];
-
   // The "payer" is whoever submits + pays the init rent (~0.002 SOL).
   // For SSP this is the relay hot wallet. Here we use member1 for simplicity.
   await airdrop(connection, member1.publicKey, 1 * LAMPORTS_PER_SOL);
 
   // Members are passed via an Address Lookup Table — each member costs
-  // ~1 byte in the init tx instead of 32, fitting up to ~7 raw signatures
-  // under Solana's 1232-byte transaction cap.
+  // ~1 byte in the init tx instead of 32.
   const membersAlt = await client.createMembersAddressLookupTable(
     members,
     member1
@@ -102,7 +98,6 @@ async function main() {
   const initResult = await client.initialize(
     members,
     threshold,
-    sigs,
     member1,
     membersAlt
   );

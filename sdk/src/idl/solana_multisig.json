@@ -464,13 +464,6 @@
           "signer": true
         },
         {
-          "name": "instructions_sysvar",
-          "docs": [
-            "Instructions Sysvar for Ed25519 signature verification"
-          ],
-          "address": "Sysvar1nstructions1111111111111111111111111"
-        },
-        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }

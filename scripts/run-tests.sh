@@ -13,6 +13,13 @@
 # phase's tests, kill the validator, repeat. Final report aggregates
 # results across phases.
 #
+# Readiness gates per phase (eliminates flakes where the validator answers
+# `cluster-version` before it can serve the first tx):
+#   1. RPC up                       (`solana cluster-version`)
+#   2. Program loaded + executable  (`solana program show <PROGRAM_ID>`)
+#   3. Slots advancing              (slot number increased by 3+)
+# Only after all three pass does the phase's mocha run start.
+#
 # Usage:
 #   ./scripts/run-tests.sh             # run all phases
 #   ./scripts/run-tests.sh phase5      # run only phase5*.ts files
@@ -97,10 +104,58 @@ for FILE in "${TEST_FILES[@]}"; do
     sleep 1
   done
   if [[ $READY -ne 1 ]]; then
-    echo "validator failed to start. log: $VALIDATOR_LOG"
+    echo "validator failed to start (RPC). log: $VALIDATOR_LOG"
     tail -40 "$VALIDATOR_LOG" || true
     FAIL=$((FAIL + 1))
     FAILED_PHASES+=("$PHASE (validator start)")
+    cleanup
+    rm -rf "$LEDGER_DIR" "$VALIDATOR_LOG"
+    unset VALIDATOR_PID
+    continue
+  fi
+
+  # Wait for the program to be loaded + executable. RPC may answer
+  # `cluster-version` before the BPF program is fully indexed; tests that
+  # fire immediately can end up with a blockhash that expires while waiting
+  # for the program to become callable. Poll until the program account is
+  # both present AND executable.
+  PROGRAM_READY=0
+  for _ in $(seq 1 30); do
+    if solana --url "$RPC_URL" program show "$PROGRAM_ID" 2>/dev/null \
+        | grep -q "Authority:"; then
+      PROGRAM_READY=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ $PROGRAM_READY -ne 1 ]]; then
+    echo "validator failed to load program $PROGRAM_ID. log: $VALIDATOR_LOG"
+    tail -40 "$VALIDATOR_LOG" || true
+    FAIL=$((FAIL + 1))
+    FAILED_PHASES+=("$PHASE (program not loaded)")
+    cleanup
+    rm -rf "$LEDGER_DIR" "$VALIDATOR_LOG"
+    unset VALIDATOR_PID
+    continue
+  fi
+
+  # Wait for the validator to actually advance slots — otherwise the first
+  # tx's recent_blockhash can be a few slots stale before it even hits the
+  # mempool, and confirmation can race the 150-slot expiry window.
+  START_SLOT="$(solana --url "$RPC_URL" slot 2>/dev/null || echo 0)"
+  SLOT_OK=0
+  for _ in $(seq 1 30); do
+    NOW_SLOT="$(solana --url "$RPC_URL" slot 2>/dev/null || echo 0)"
+    if [[ $NOW_SLOT -gt $((START_SLOT + 3)) ]]; then
+      SLOT_OK=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ $SLOT_OK -ne 1 ]]; then
+    echo "validator slot not advancing (still at $START_SLOT)"
+    FAIL=$((FAIL + 1))
+    FAILED_PHASES+=("$PHASE (slot stalled)")
     cleanup
     rm -rf "$LEDGER_DIR" "$VALIDATOR_LOG"
     unset VALIDATOR_PID

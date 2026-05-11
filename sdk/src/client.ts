@@ -9,12 +9,10 @@ import {
   VersionedTransaction,
   AddressLookupTableProgram,
   sendAndConfirmTransaction,
-  SYSVAR_INSTRUCTIONS_PUBKEY,
 } from "@solana/web3.js";
 import * as anchor from "@coral-xyz/anchor";
 import { Program, AnchorProvider } from "@coral-xyz/anchor";
 import {
-  SignatureData,
   InitializeResult,
   CreateTransactionResult,
   MultisigConfig,
@@ -24,13 +22,9 @@ import {
 import {
   deriveMultisigAddress,
   deriveVaultAddress,
-  createInitSignature,
-  createInitializationMessage,
   hashMembers,
   sortMembers,
   validateConfig,
-  verifySignature,
-  createBatchedEd25519Instruction,
   buildMessageFromInstructions,
 } from "./utils";
 
@@ -45,8 +39,12 @@ import {
  */
 export interface AnchorWalletLike {
   publicKey: PublicKey;
-  signTransaction<T>(tx: T): Promise<T>;
-  signAllTransactions<T>(txs: T[]): Promise<T[]>;
+  signTransaction<T extends Transaction | VersionedTransaction>(
+    tx: T
+  ): Promise<T>;
+  signAllTransactions<T extends Transaction | VersionedTransaction>(
+    txs: T[]
+  ): Promise<T[]>;
   payer?: Keypair;
 }
 
@@ -158,87 +156,10 @@ export class SolanaMultisigClient {
   }
 
   /**
-   * Create an initialization signature (off-chain)
-   * Each member must call this with their private key
-   */
-  createSignature(
-    members: PublicKey[],
-    threshold: number,
-    memberKeypair: Keypair
-  ): SignatureData {
-    validateConfig(members, threshold);
-
-    // Ensure the keypair is actually a member
-    const sortedMembers = sortMembers(members);
-    if (!sortedMembers.some((m) => m.equals(memberKeypair.publicKey))) {
-      throw new Error("Keypair is not a member of this multisig");
-    }
-
-    return createInitSignature(members, threshold, memberKeypair);
-  }
-
-  /**
-   * Verify signatures (client-side validation before sending to chain)
-   */
-  verifySignatures(
-    members: PublicKey[],
-    threshold: number,
-    signatures: SignatureData[]
-  ): { valid: boolean; errors: string[] } {
-    const errors: string[] = [];
-
-    try {
-      validateConfig(members, threshold);
-    } catch (e) {
-      errors.push(`Config validation failed: ${(e as Error).message}`);
-      return { valid: false, errors };
-    }
-
-    // Check we have enough signatures
-    if (signatures.length < threshold) {
-      errors.push(
-        `Insufficient signatures: need ${threshold}, got ${signatures.length}`
-      );
-    }
-
-    // Verify each signature
-    const sortedMembers = sortMembers(members);
-    const seenSigners = new Set<string>();
-
-    for (const sig of signatures) {
-      // Check signer is a member
-      if (!sortedMembers.some((m) => m.equals(sig.signer))) {
-        errors.push(`Signer ${sig.signer.toString()} is not a member`);
-        continue;
-      }
-
-      // Check for duplicates
-      const signerStr = sig.signer.toString();
-      if (seenSigners.has(signerStr)) {
-        errors.push(`Duplicate signature from ${signerStr}`);
-        continue;
-      }
-      seenSigners.add(signerStr);
-
-      // Verify signature
-      if (!verifySignature(sig, members, threshold)) {
-        errors.push(`Invalid signature from ${signerStr}`);
-      }
-    }
-
-    return {
-      valid: errors.length === 0,
-      errors,
-    };
-  }
-
-  /**
    * Create an Address Lookup Table populated with the multisig's members
-   * AND the well-known accounts that the init ix references (`SystemProgram`,
-   * instructions sysvar). Including those system accounts in the ALT lets
-   * the V0 compiler route them through the lookup instead of bloating the
-   * static account list — recovers ~64 bytes that's needed to fit big
-   * multisigs (e.g. 7-of-10) under the 1232-byte tx cap.
+   * AND `SystemProgram`, which the init ix references. Including SystemProgram
+   * in the ALT lets the V0 compiler route it through the lookup instead of
+   * bloating the static account list.
    *
    * Members are stored sorted so all callers produce identical ALT
    * contents for the same member set. The ALT can be reused across many
@@ -257,11 +178,7 @@ export class SolanaMultisigClient {
       throw new Error("createMembersAddressLookupTable: members is empty");
     }
     const sortedMembers = sortMembers(members);
-    const altAddresses = [
-      ...sortedMembers,
-      SystemProgram.programId,
-      SYSVAR_INSTRUCTIONS_PUBKEY,
-    ];
+    const altAddresses = [...sortedMembers, SystemProgram.programId];
 
     const recentSlot = await this.connection.getSlot("finalized");
     const [createIx, lookupTableAddress] =
@@ -309,34 +226,24 @@ export class SolanaMultisigClient {
   }
 
   /**
-   * Initialize the multisig.
+   * Initialize the multisig at its deterministic PDA. Permissionless —
+   * no member signatures required; the PDA address is fully determined
+   * by `(sorted_members, threshold)` so initializing with the canonical
+   * inputs is the only way to land at the canonical address. Authorization
+   * is enforced by the threshold check on `create_transaction` /
+   * `approve_transaction` / `execute_transaction`.
    *
-   * The transaction contains:
-   *   ix[0] = batched Ed25519 native-program ix verifying every collected
-   *           signature over the shared 67-byte init message
-   *   ix[1] = our `initialize_multisig` ix; members are passed as
-   *           `remaining_accounts` resolved from the supplied ALT, the
-   *           pre-computed `member_hash` is the on-chain PDA seed
-   *
-   * Built as a V0 transaction so the ALT lookup is honored. Members in
-   * the ALT keep the on-chain payload to ~1 byte per member instead of 32,
-   * letting us fit up to 7 raw signatures in a single tx.
+   * Built as a V0 transaction so the ALT lookup is honored: members are
+   * passed as `remaining_accounts` resolved from the supplied ALT, keeping
+   * the on-chain payload to ~1 byte per member instead of 32.
    */
   async initialize(
     members: PublicKey[],
     threshold: number,
-    signatures: SignatureData[],
     payer: Keypair,
     membersAlt: PublicKey
   ): Promise<InitializeResult> {
     validateConfig(members, threshold);
-
-    const validation = this.verifySignatures(members, threshold, signatures);
-    if (!validation.valid) {
-      throw new Error(
-        `Signature validation failed:\n${validation.errors.join("\n")}`
-      );
-    }
 
     const sortedMembers = sortMembers(members);
     const [multisigAddress, bump] = deriveMultisigAddress(
@@ -349,9 +256,6 @@ export class SolanaMultisigClient {
     // sorted member pubkeys, also used as the PDA seed.
     const memberHash = hashMembers(sortedMembers);
 
-    const message = createInitializationMessage(members, threshold);
-    const ed25519Ix = createBatchedEd25519Instruction(signatures, message);
-
     const initializeIx = await this.program.methods
       .initializeMultisig(
         Array.from(memberHash),
@@ -361,7 +265,6 @@ export class SolanaMultisigClient {
       .accounts({
         multisig: multisigAddress,
         payer: payer.publicKey,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         systemProgram: SystemProgram.programId,
       })
       .remainingAccounts(
@@ -386,7 +289,7 @@ export class SolanaMultisigClient {
     const v0Message = new Web3TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: blockhash,
-      instructions: [ed25519Ix, initializeIx],
+      instructions: [initializeIx],
     }).compileToV0Message([altResp.value]);
 
     const tx = new VersionedTransaction(v0Message);
@@ -698,10 +601,9 @@ export class SolanaMultisigClient {
   }
 
   /**
-   * Build the `initialize_multisig` instruction (ix only — does not include
-   * the batched Ed25519 verify ix, which the caller must place at tx index 0).
-   *
-   * Pair with {@link createBatchedEd25519InstructionForInit}.
+   * Build the `initialize_multisig` instruction (ix only). Permissionless —
+   * the only signer required by this ix is `payer` (for rent), which is
+   * already the outer tx's fee payer. No member signatures involved.
    */
   async buildInitializeMultisigInstruction(opts: {
     members: PublicKey[];
@@ -729,7 +631,6 @@ export class SolanaMultisigClient {
       .accounts({
         multisig: multisigAddress,
         payer: opts.payer,
-        instructionsSysvar: SYSVAR_INSTRUCTIONS_PUBKEY,
         systemProgram: SystemProgram.programId,
       })
       .remainingAccounts(
@@ -887,8 +788,9 @@ export class SolanaMultisigClient {
   // index has its own multisig (members = [walletPubkey[i], keyPubkey[i]]).
   // A send for address index `i` becomes a single Solana tx containing:
   //
-  //   ix[0] = (optional) ed25519_verify_batched     ← only on first init
-  //   ix[1] = (optional) initialize_multisig         ← only on first init
+  //   ix[0] = (optional) initialize_multisig         ← only on first send;
+  //                                                   permissionless, no
+  //                                                   member sigs required
   //   ix[N] = create_transaction
   //   ix[N+1] = approve_transaction (wallet member)
   //   ix[N+2] = approve_transaction (key member)

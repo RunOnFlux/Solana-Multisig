@@ -88,12 +88,9 @@ async function main() {
   await connection.confirmTransaction(fundSig, "confirmed");
   log("\n[2] Funded 5 members with", sol(memberFundLamports), "SOL each");
 
-  // 3. Init multisig
+  // 3. Init multisig (permissionless — no member sigs)
   const multisigAddress = client.deriveAddress(memberPubkeys, threshold);
   const vaultPda = client.deriveVaultAddress(multisigAddress, 0);
-  const sigs = members
-    .slice(0, threshold)
-    .map((m) => client.createSignature(memberPubkeys, threshold, m));
   const alt = await client.createMembersAddressLookupTable(
     memberPubkeys,
     deployer
@@ -101,7 +98,6 @@ async function main() {
   const initResult = await client.initialize(
     memberPubkeys,
     threshold,
-    sigs,
     deployer,
     alt
   );
