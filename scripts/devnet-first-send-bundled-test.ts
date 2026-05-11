@@ -2,8 +2,18 @@
  * Devnet smoke test — bundled FIRST send with init + provision_nonce in
  * one V0 tx.
  *
- * This mirrors what the SSP wallet does on the very first SOL send from a
- * never-used vault. The outer tx contains:
+ * ⚠️  LEGACY PATTERN — NOT the current SSP wallet flow.
+ *
+ * The current SSP wallet:
+ *   1. Calls relay's POST /v1/sol/setup ONCE per vault (paymaster does
+ *      init + provision_nonce as a separate paymaster-only tx)
+ *   2. Builds the actual send tx using the durable nonce
+ *
+ * See `devnet-setup-endpoint-flow-test.ts` for coverage of the current
+ * flow. This test is retained as proof that the on-chain program STILL
+ * supports the bundled init+provision+send pattern in one V0 tx — useful
+ * for integrators who want to skip the setup endpoint at the cost of
+ * race-prone regular-blockhash semantics for the first send.
  *
  *   ix[0] = initialize_multisig  (permissionless)
  *   ix[1] = provision_nonce      (permissionless)
@@ -12,15 +22,6 @@
  *   ix[4] = approve_transaction  (key member)
  *   ix[5] = execute_transaction
  *   ix[6] = close_transaction
- *
- * recentBlockhash is a regular blockhash for THIS tx (the nonce doesn't
- * exist yet — we're creating it). The wallet builds + signs + sends
- * immediately so there's no human-loop delay to race the blockhash.
- *
- * Verifies:
- *   - The tx fits under Solana's 1232-byte cap with all 7 ixs
- *   - All steps land atomically in one tx
- *   - Post-send the nonce account exists and is ready for subsequent sends
  *
  * Run: yarn ts-node scripts/devnet-first-send-bundled-test.ts
  */

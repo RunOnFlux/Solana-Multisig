@@ -1,8 +1,23 @@
 /**
  * Devnet smoke test — bundled single-tx send.
  *
- * Mirrors the SSP consumer wallet's actual production flow: a 2-of-2 multisig
- * sends SOL in ONE Solana transaction containing:
+ * ⚠️  LEGACY PATTERN — NOT the current SSP wallet flow.
+ *
+ * The current SSP wallet:
+ *   1. Calls relay's POST /v1/sol/setup ONCE per vault (paymaster does
+ *      init + provision_nonce as its own tx)
+ *   2. Builds the actual send tx using the durable nonce
+ *
+ * That separated flow is bullet-proof against the 60s blockhash race
+ * (durable nonce never expires). See `devnet-setup-endpoint-flow-test.ts`
+ * for the current flow's full coverage.
+ *
+ * This test is retained as documentation that the on-chain program STILL
+ * supports the bundled `init + create + approve×2 + execute + close`
+ * pattern in one tx — useful for advanced integrators who want to skip
+ * the setup endpoint and build everything bundled (at the cost of having
+ * to use a regular blockhash, which races against the 60s window if there
+ * is any human-loop delay).
  *
  *   ix[0] = initialize_multisig          (only on first send; permissionless)
  *   ix[1] = create_transaction           (proposal authoring)
@@ -10,17 +25,6 @@
  *   ix[3] = approve_transaction (member1)
  *   ix[4] = execute_transaction
  *   ix[5] = close_transaction            (rent refund to paymaster)
- *
- * Demonstrates:
- *   - The permissionless init bundled with a send (no member sigs over an
- *     init message — the canonical PDA + sorted_members hash binding alone
- *     guarantees correctness)
- *   - Subsequent send on the same multisig (no init ix; 4 ixs only)
- *   - Tx stays under Solana's 1232-byte cap for both paths
- *   - paymaster ≠ member: a separate paymaster keypair signs the fee and
- *     funds proposal rent; members only sign their own approve ixes
- *
- * This is the path real SSP wallet → key → relay traffic takes for SOL sends.
  *
  * Run: yarn ts-node scripts/devnet-bundled-singletx-test.ts
  */

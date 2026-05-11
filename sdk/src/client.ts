@@ -583,15 +583,20 @@ export class SolanaMultisigClient {
    * Derive the (transactionAddress, transactionIndex) pair for the proposal
    * that will be created NEXT given the current on-chain transaction_index.
    *
-   * The caller is responsible for passing the current index — fetch it via
-   * `getMultisig(addr)` and use `multisig.transactionIndex` if you don't
-   * already have it.
+   * Accepts `currentTransactionIndex` as `bigint | number | anchor.BN` —
+   * anchor's u64 field deserialization returns BN at runtime even when the
+   * SDK's TS type declares bigint. Without normalization, `BN + BigInt(1)`
+   * silently produces a STRING via JS coercion (e.g. `BN(1) + 1n` = "11"),
+   * which then parses back as decimal 11, producing wildly wrong PDAs and
+   * a ConstraintSeeds error on the second send onward. Always coerce via
+   * `.toString()` first.
    */
   predictNextTransactionPda(
     multisigAddress: PublicKey,
-    currentTransactionIndex: bigint
+    currentTransactionIndex: bigint | number | { toString(): string }
   ): { transactionAddress: PublicKey; transactionIndex: bigint } {
-    const transactionIndex = currentTransactionIndex + BigInt(1);
+    const currentBig = BigInt(currentTransactionIndex.toString());
+    const transactionIndex = currentBig + BigInt(1);
     const [transactionAddress] = PublicKey.findProgramAddressSync(
       [
         Buffer.from("transaction"),
@@ -656,7 +661,13 @@ export class SolanaMultisigClient {
    */
   async buildCreateTransactionInstruction(opts: {
     multisigAddress: PublicKey;
-    currentTransactionIndex: bigint;
+    /**
+     * Current on-chain `multisig.transactionIndex`. Accepts bigint, number,
+     * or anchor.BN — internally normalized via toString() before arithmetic
+     * to dodge the JS coercion footgun where `BN(N) + BigInt(1)` produces
+     * a string instead of an arithmetic sum.
+     */
+    currentTransactionIndex: bigint | number | { toString(): string };
     vaultIndex: number;
     message: TransactionMessage;
     creator: PublicKey;
@@ -846,6 +857,89 @@ export class SolanaMultisigClient {
       { commitment: "confirmed" }
     );
     return { signature, nonceAccount };
+  }
+
+  /**
+   * One-shot bundled setup: initializes the multisig AND provisions its
+   * durable nonce account in a single atomic paymaster-signed tx.
+   *
+   * This is what the relay paymaster runs via the `POST /v1/sol/setup`
+   * endpoint before the user's first send. After this lands, the wallet
+   * can immediately build durable-nonce-flow send txes (no blockhash race
+   * possible even on the very first user send).
+   *
+   * Idempotent in spirit: if multisig or nonce already exist, the matching
+   * sub-ix fails inside the tx and the bundle aborts — callers can detect
+   * via getMultisig / getAccountInfo and skip if already provisioned.
+   *
+   * Returns the deterministic addresses + the initial nonce value so the
+   * caller can immediately use it as `recentBlockhash` in subsequent txes.
+   */
+  async setupMultisigAndNonce(opts: {
+    members: PublicKey[];
+    threshold: number;
+    payer: Keypair;
+    /**
+     * Pre-existing ALT containing the sorted member pubkeys + SystemProgram.
+     * Required because `initialize_multisig` passes members via
+     * `remaining_accounts` and the tx-size budget needs ALT compaction.
+     */
+    membersAlt: PublicKey;
+  }): Promise<{
+    signature: string;
+    multisigAddress: PublicKey;
+    nonceAccount: PublicKey;
+    nonceValue: string;
+  }> {
+    validateConfig(opts.members, opts.threshold);
+    const sortedMembers = sortMembers(opts.members);
+
+    const { instruction: initIx, multisigAddress } =
+      await this.buildInitializeMultisigInstruction({
+        members: sortedMembers,
+        threshold: opts.threshold,
+        payer: opts.payer.publicKey,
+      });
+    const { instruction: provisionIx, nonceAccount } =
+      await this.buildProvisionNonceInstruction({
+        multisigAddress,
+        payer: opts.payer.publicKey,
+      });
+
+    const altResp = await this.connection.getAddressLookupTable(opts.membersAlt);
+    if (!altResp.value) {
+      throw new Error(
+        `ALT not found at ${opts.membersAlt.toBase58()} — call createMembersAddressLookupTable first`
+      );
+    }
+
+    const { blockhash } = await this.connection.getLatestBlockhash();
+    const v0Msg = new Web3TransactionMessage({
+      payerKey: opts.payer.publicKey,
+      recentBlockhash: blockhash,
+      instructions: [initIx, provisionIx],
+    }).compileToV0Message([altResp.value]);
+
+    const tx = new VersionedTransaction(v0Msg);
+    tx.sign([opts.payer]);
+    const signature = await this.connection.sendTransaction(tx);
+    await this.connection.confirmTransaction(signature, "confirmed");
+
+    // Re-fetch the nonce so callers get the live value to use as
+    // `recentBlockhash` for their next bundled send.
+    const nonceState = await this.connection.getNonceAndContext(nonceAccount);
+    if (!nonceState.value) {
+      throw new Error(
+        `nonce account ${nonceAccount.toBase58()} did not initialize`
+      );
+    }
+
+    return {
+      signature,
+      multisigAddress,
+      nonceAccount,
+      nonceValue: nonceState.value.nonce,
+    };
   }
 
   // ==========================================================================

@@ -152,11 +152,12 @@ Smoke tests against devnet live in `scripts/`:
 - `devnet-smoke-test.ts` — basic 3-of-5 SOL flow
 - `devnet-spl-smoke-test.ts` — SPL token transfer
 - `devnet-large-smoke-test.ts` — 7-of-10 multisig via ALT
-- `devnet-bundled-singletx-test.ts` — consumer SSP pattern (init + create + approve×2 + execute + close in ONE V0 tx)
 - `devnet-decoupled-init-test.ts` — enterprise pattern (paymaster pre-inits with no members online, members operate later)
 - `devnet-jupiter-format-test.ts` — Jupiter swap fits proposal format
-- `devnet-durable-nonce-test.ts` — durable-nonce flow: provision + bundled send with 90s pause between wallet sign and key sign (no blockhash race)
-- `devnet-first-send-bundled-test.ts` — bundled first send (init + provision_nonce + create + approve×2 + execute + close, all 7 ixs in one V0 tx; 985 bytes)
+- `devnet-durable-nonce-test.ts` — durable-nonce flow standalone: provision + bundled send with 90s pause between wallet sign and key sign (no blockhash race)
+- `devnet-setup-endpoint-flow-test.ts` — **the current SSP wallet flow**: relay's `/v1/sol/setup` (init + provision_nonce as paymaster-only tx) → then wallet builds the durable-nonce send → 70s pause → key signs → broadcast. End-to-end.
+- `devnet-bundled-singletx-test.ts` — *(legacy)* bundled init+create+approve×2+execute+close in ONE V0 tx without nonce. The program still supports it; the current wallet doesn't use this pattern.
+- `devnet-first-send-bundled-test.ts` — *(legacy)* bundled init+provision+send in ONE V0 tx. The program still supports it; the current wallet does setup as a separate paymaster tx instead.
 
 ## How this differs from Squads V4
 
