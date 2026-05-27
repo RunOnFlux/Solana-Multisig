@@ -114,18 +114,32 @@ export class SolanaMultisigClient {
     this.connection = connection;
     this.programId = programId;
 
-    // Default to a no-op read-only wallet — the SDK only signs via explicit
-    // helpers callers pass keypairs to (see e.g. `initialize`,
-    // `createTransaction`); the AnchorProvider's wallet is never asked to
-    // sign anything from inside the SDK. Inlining a stub here (instead of
-    // `new Wallet(...)` from anchor) means bundlers don't need to keep
-    // anchor's `Wallet` class reachable.
+    // Default to a read-only stub wallet — query-only methods (`deriveAddress`,
+    // `getMultisig`, the `build*Instruction` helpers) never ask the provider
+    // wallet to sign. Inlining a stub here (instead of `new Wallet(...)` from
+    // anchor) means bundlers don't need to keep anchor's `Wallet` class
+    // reachable.
+    //
+    // The stub's signing methods THROW rather than silently return the
+    // unsigned tx: the `.rpc()`-flavored methods (`initialize`,
+    // `createTransaction`, …) use the provider wallet as fee payer and will
+    // ask it to sign. A no-op stub there would produce an unsigned tx that the
+    // cluster rejects with a confusing "missing signature" error far from the
+    // real cause (constructing the client without a wallet). Throwing here
+    // points directly at the fix.
     const stubKeypair = Keypair.generate();
+    const throwNoWallet = (): never => {
+      throw new Error(
+        "SolanaMultisigClient was constructed without a wallet, so it cannot sign transactions. " +
+          "Pass a wallet to the constructor for .rpc()-flavored methods (initialize, createTransaction, …), " +
+          "or use the explicit instruction-builder methods (build*Instruction) for read-only / external-signing flows."
+      );
+    };
     const readonlyWallet: AnchorWalletLike = wallet ?? {
       publicKey: stubKeypair.publicKey,
       payer: stubKeypair,
-      signTransaction: <T>(tx: T): Promise<T> => Promise.resolve(tx),
-      signAllTransactions: <T>(txs: T[]): Promise<T[]> => Promise.resolve(txs),
+      signTransaction: throwNoWallet,
+      signAllTransactions: throwNoWallet,
     };
     this.provider = new AnchorProvider(
       connection,
@@ -810,6 +824,17 @@ export class SolanaMultisigClient {
    * One-time per multisig — calling a second time will fail with the System
    * Program rejecting the create (account already exists at the derived
    * address). Callers should treat that as success (nonce already available).
+   *
+   * ⚠️ RACE-VULNERABLE WHEN SENT STANDALONE. Because the nonce address is
+   * deterministic and provisioning is permissionless, an attacker who watches
+   * for a fresh `initialize_multisig` can front-run a standalone
+   * `provision_nonce` and become the nonce authority. They cannot touch vault
+   * funds, but they can grief the durable-nonce flow (advance/withdraw the
+   * nonce, refuse to hand authority back). For production, ALWAYS provision
+   * the nonce atomically with init via {@link setupMultisigAndNonce}, which
+   * bundles both into one transaction so no third party can interleave. Only
+   * use the standalone {@link provisionNonce} for testing or when you accept
+   * the race.
    */
   async buildProvisionNonceInstruction(opts: {
     multisigAddress: PublicKey;
@@ -839,6 +864,10 @@ export class SolanaMultisigClient {
    * Idempotent in spirit — if the nonce already exists, this errors out with
    * a System Program "account already in use" error which the caller should
    * treat as a success signal.
+   *
+   * ⚠️ RACE-VULNERABLE: this standalone path can be front-run between init and
+   * provision — see {@link buildProvisionNonceInstruction}. Use
+   * {@link setupMultisigAndNonce} in production; reserve this for tests.
    */
   async provisionNonce(opts: {
     multisigAddress: PublicKey;

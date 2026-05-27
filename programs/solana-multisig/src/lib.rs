@@ -225,14 +225,18 @@ pub mod solana_multisig {
         );
 
         // Detect duplicate account_keys (wasteful and likely a client bug).
-        for i in 0..message.account_keys.len() {
-            for j in (i + 1)..message.account_keys.len() {
-                require_msg!(
-                    message.account_keys[i] != message.account_keys[j],
-                    ErrorCode::InvalidMessage,
-                    "InvalidMessage: duplicate entry in account_keys"
-                );
-            }
+        // Sort a copy and scan adjacent entries — O(n log n) instead of the
+        // naive O(n²) pairwise scan, which at MAX_TX_ACCOUNT_KEYS=128 would be
+        // up to 8,128 32-byte comparisons on the happy path. Mirrors the
+        // member-dedup approach in `initialize_multisig`.
+        let mut sorted_keys = message.account_keys.clone();
+        sorted_keys.sort();
+        for i in 0..sorted_keys.len().saturating_sub(1) {
+            require_msg!(
+                sorted_keys[i] != sorted_keys[i + 1],
+                ErrorCode::InvalidMessage,
+                "InvalidMessage: duplicate entry in account_keys"
+            );
         }
 
         // Per-instruction Vec bounds (so we fail with a clean error before
@@ -411,6 +415,17 @@ pub mod solana_multisig {
         {
             let multisig = &ctx.accounts.multisig;
             let transaction = &ctx.accounts.transaction;
+
+            // Defense-in-depth: the multisig is declared non-mut, but an
+            // executor could still flip its writable flag via remaining_accounts
+            // to enable a recursive create_transaction CPI. We never write the
+            // multisig in execute_transaction, so reject any tx that marks it
+            // writable — converts the account-context immutability into a hard
+            // runtime guarantee.
+            require!(
+                !multisig.to_account_info().is_writable,
+                ErrorCode::MultisigMustBeReadonly
+            );
 
             require_keys_eq!(
                 transaction.multisig,
@@ -656,6 +671,15 @@ pub mod solana_multisig {
     /// `createAccountWithSeed` will fail if the account already exists,
     /// which clients should treat as success — the nonce is already
     /// available).
+    ///
+    /// SECURITY (race): because the nonce address is deterministic and this
+    /// instruction is permissionless, sending it as a *standalone* tx lets an
+    /// attacker front-run the legitimate paymaster and become the nonce
+    /// authority. That cannot touch vault funds, but it can grief the
+    /// durable-nonce convenience flow (advance/withdraw the nonce, withhold
+    /// authority). Production callers MUST bundle init + provision atomically
+    /// in a single tx (see the SDK's `setupMultisigAndNonce`) so no third
+    /// party can interleave between the two.
     pub fn provision_nonce(ctx: Context<ProvisionNonce>) -> Result<()> {
         // Derive the multisig PDA's signer seeds so SystemProgram's
         // create_account_with_seed will accept invoke_signed for "base".
@@ -945,13 +969,21 @@ pub struct ApproveTransaction<'info> {
 #[derive(Accounts)]
 #[instruction(transaction_index: u64)]
 pub struct ExecuteTransaction<'info> {
-    /// Read-only — execute_transaction never writes to multisig fields. Keeping
-    /// this immutable prevents Anchor's auto-exit from re-serializing the
-    /// cached struct at function end, which would otherwise overwrite any
-    /// mutations made by recursive CPIs (e.g. a malicious proposal CPI'ing
-    /// into create_transaction). Side benefit: blocks recursive
-    /// create_transaction calls entirely (their constraint requires the outer
-    /// tx to mark multisig writable, which conflicts with this immutability).
+    /// Declared non-mut so Anchor does NOT auto-flush the cached struct at
+    /// function exit. This prevents Anchor from overwriting any mutations
+    /// performed by a recursive CPI back into this program (e.g. a malicious
+    /// proposal CPI'ing into create_transaction).
+    ///
+    /// Note: declaring it non-mut here does NOT, on its own, prevent the
+    /// multisig from being marked writable in the *compiled* transaction — an
+    /// executor can still flip the writable flag by passing the multisig in
+    /// `remaining_accounts` with `is_writable: true`, which would let a
+    /// recursive create_transaction satisfy its `#[account(mut)]` requirement.
+    /// Such a recursive call grants no privilege beyond what a member could do
+    /// via a direct create_transaction (it still needs the member's signature
+    /// in the outer tx). We additionally reject the writable-flag override at
+    /// runtime in `execute_transaction` (see the is_writable check), turning
+    /// this immutability into a hard runtime guarantee.
     pub multisig: Account<'info, Multisig>,
 
     #[account(
@@ -1272,4 +1304,7 @@ pub enum ErrorCode {
 
     #[msg("Member count argument does not match the provided members list")]
     InvalidMemberCount,
+
+    #[msg("Multisig account must not be marked writable when executing")]
+    MultisigMustBeReadonly,
 }

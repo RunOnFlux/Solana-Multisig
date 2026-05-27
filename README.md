@@ -98,6 +98,40 @@ See `sdk/examples/full-flow.ts` for the complete end-to-end example.
 | Member-set immutability | `members`, `threshold`, `bump` are written once at init; no instruction can modify them post-init |
 | Durable nonce for human-loop signing | `provision_nonce` creates a system-owned nonce account at `createWithSeed(multisigPda, "nonce", SystemProgram)`. Sends after first use `SystemProgram.nonceAdvance` at ix[0] + the nonce value as `recentBlockhash` → wallet's signature survives arbitrary user-approval delays. Address is pure-derivable (paymaster-independent); paymaster rotation transfers authority via standard `SystemProgram.nonceAuthorize` |
 
+### Dangerous proposal patterns (operator guidance)
+
+A proposal that reaches threshold can do **anything the vault can do** — including permanently bricking the vault. The vault works as a fund source only because it is **system-owned with empty data**, and two `SystemProgram` instructions silently destroy that property:
+
+| Instruction on the vault | Effect | Recoverable? |
+|---|---|---|
+| `SystemProgram::assign` (or `assignWithSeed`) | Changes the vault's owner away from SystemProgram → `SystemProgram::transfer` from it stops working | ❌ No program instruction can undo it; native SOL becomes stuck |
+| `SystemProgram::allocate` (or `allocateWithSeed`) | Gives the vault non-empty data → `transfer` requires an empty source → breaks | ❌ Same — SOL stranded |
+
+This requires threshold approval, so it is **not** an external attack vector (a rogue threshold can already drain the vault the normal way). The realistic risk is **operator error / blind-signing**: a member approves a proposal whose true effect isn't obvious from the raw instruction data.
+
+**Mitigations:**
+- Signing clients (SSP wallet) MUST decode proposal instructions and **warn loudly** on any `SystemProgram::assign`/`allocate` (and the `withSeed` variants) targeting the vault (`account_keys[0]`).
+- Treat any proposal that touches the vault with something other than `transfer` / token instructions as suspicious and surface it to the signer.
+- The program does **not** block these patterns — by design, approved members can do anything. The defense lives in the signing UI.
+
+## Key rotation: migrate, don't rotate
+
+`members`, `threshold`, and `bump` are **immutable** after init (see the Security table). This is deliberate: the canonical PDA always reflects the canonical member set, so no governance action can retroactively weaken the threshold depositors relied on. The cost is that there is **no in-place member rotation** — to change the member set or threshold you migrate funds to a new multisig.
+
+**Migration playbook:**
+
+1. **Derive** the new `(multisig_pda, vault_pda)` for the new `(members, threshold)` off-chain.
+2. **Init** the new multisig (permissionless — no member sigs).
+3. **Drain the old vault** under the *old* multisig via the normal create → approve×M → execute flow:
+   - One proposal transferring all native SOL from the old vault to the new vault.
+   - For SPL: transfer each token balance from the old vault's ATAs to the new vault's ATAs (optionally close the emptied old ATAs to reclaim their rent).
+4. **Repoint downstream consumers** of the old vault address — deposit flows, saved addresses, relay/paymaster config, anything that hardcoded the old address.
+5. **Verify** the old vault balance is `0` and the new vault holds everything.
+
+**Caveats:**
+- The old multisig PDA's rent (~0.003–0.0077 SOL) stays locked — there is no `close_multisig` instruction.
+- The migration proposal itself must clear threshold. If a member key is lost and the remaining members fall **below** threshold, you cannot execute the migration and funds are stuck. For high-value vaults, prefer `threshold < N` so a single lost key doesn't brick the multisig.
+
 ## Limits
 
 | Limit | Value | Rationale |
