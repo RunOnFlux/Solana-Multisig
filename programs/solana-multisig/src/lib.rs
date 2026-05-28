@@ -416,17 +416,6 @@ pub mod solana_multisig {
             let multisig = &ctx.accounts.multisig;
             let transaction = &ctx.accounts.transaction;
 
-            // Defense-in-depth: the multisig is declared non-mut, but an
-            // executor could still flip its writable flag via remaining_accounts
-            // to enable a recursive create_transaction CPI. We never write the
-            // multisig in execute_transaction, so reject any tx that marks it
-            // writable — converts the account-context immutability into a hard
-            // runtime guarantee.
-            require!(
-                !multisig.to_account_info().is_writable,
-                ErrorCode::MultisigMustBeReadonly
-            );
-
             require_keys_eq!(
                 transaction.multisig,
                 multisig.key(),
@@ -974,16 +963,21 @@ pub struct ExecuteTransaction<'info> {
     /// performed by a recursive CPI back into this program (e.g. a malicious
     /// proposal CPI'ing into create_transaction).
     ///
-    /// Note: declaring it non-mut here does NOT, on its own, prevent the
-    /// multisig from being marked writable in the *compiled* transaction — an
-    /// executor can still flip the writable flag by passing the multisig in
-    /// `remaining_accounts` with `is_writable: true`, which would let a
-    /// recursive create_transaction satisfy its `#[account(mut)]` requirement.
-    /// Such a recursive call grants no privilege beyond what a member could do
-    /// via a direct create_transaction (it still needs the member's signature
-    /// in the outer tx). We additionally reject the writable-flag override at
-    /// runtime in `execute_transaction` (see the is_writable check), turning
-    /// this immutability into a hard runtime guarantee.
+    /// Note: declaring it non-mut here does NOT prevent the multisig from being
+    /// marked writable in the *compiled* transaction. The writable flag is set
+    /// at the transaction level (the union across every instruction that
+    /// references the account), so it is writable whenever the same tx ALSO
+    /// contains a create_transaction / close_transaction that legitimately
+    /// needs `#[account(mut)]` on the multisig — which is exactly the supported
+    /// "bundled single-tx" pattern (init? + create + approve×M + execute +
+    /// close). We therefore must NOT assert `is_writable == false` here; doing
+    /// so would break every bundled flow.
+    ///
+    /// This is harmless: a recursive create_transaction CPI (which the writable
+    /// flag would enable) grants no privilege beyond what a member could do via
+    /// a direct create_transaction — it still requires the member's signature
+    /// in the outer tx — and the non-mut binding above keeps Anchor from
+    /// clobbering any such CPI's writes at exit.
     pub multisig: Account<'info, Multisig>,
 
     #[account(
@@ -1304,7 +1298,4 @@ pub enum ErrorCode {
 
     #[msg("Member count argument does not match the provided members list")]
     InvalidMemberCount,
-
-    #[msg("Multisig account must not be marked writable when executing")]
-    MultisigMustBeReadonly,
 }
