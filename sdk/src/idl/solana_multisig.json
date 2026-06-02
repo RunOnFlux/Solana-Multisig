@@ -357,13 +357,26 @@
         {
           "name": "multisig",
           "docs": [
-            "Read-only — execute_transaction never writes to multisig fields. Keeping",
-            "this immutable prevents Anchor's auto-exit from re-serializing the",
-            "cached struct at function end, which would otherwise overwrite any",
-            "mutations made by recursive CPIs (e.g. a malicious proposal CPI'ing",
-            "into create_transaction). Side benefit: blocks recursive",
-            "create_transaction calls entirely (their constraint requires the outer",
-            "tx to mark multisig writable, which conflicts with this immutability)."
+            "Declared non-mut so Anchor does NOT auto-flush the cached struct at",
+            "function exit. This prevents Anchor from overwriting any mutations",
+            "performed by a recursive CPI back into this program (e.g. a malicious",
+            "proposal CPI'ing into create_transaction).",
+            "",
+            "Note: declaring it non-mut here does NOT prevent the multisig from being",
+            "marked writable in the *compiled* transaction. The writable flag is set",
+            "at the transaction level (the union across every instruction that",
+            "references the account), so it is writable whenever the same tx ALSO",
+            "contains a create_transaction / close_transaction that legitimately",
+            "needs `#[account(mut)]` on the multisig — which is exactly the supported",
+            "\"bundled single-tx\" pattern (init? + create + approve×M + execute +",
+            "close). We therefore must NOT assert `is_writable == false` here; doing",
+            "so would break every bundled flow.",
+            "",
+            "This is harmless: a recursive create_transaction CPI (which the writable",
+            "flag would enable) grants no privilege beyond what a member could do via",
+            "a direct create_transaction — it still requires the member's signature",
+            "in the outer tx — and the non-mut binding above keeps Anchor from",
+            "clobbering any such CPI's writes at exit."
           ]
         },
         {
@@ -513,7 +526,16 @@
         "Idempotent in spirit: callable once per multisig (SystemProgram's",
         "`createAccountWithSeed` will fail if the account already exists,",
         "which clients should treat as success — the nonce is already",
-        "available)."
+        "available).",
+        "",
+        "SECURITY (race): because the nonce address is deterministic and this",
+        "instruction is permissionless, sending it as a *standalone* tx lets an",
+        "attacker front-run the legitimate paymaster and become the nonce",
+        "authority. That cannot touch vault funds, but it can grief the",
+        "durable-nonce convenience flow (advance/withdraw the nonce, withhold",
+        "authority). Production callers MUST bundle init + provision atomically",
+        "in a single tx (see the SDK's `setupMultisigAndNonce`) so no third",
+        "party can interleave between the two."
       ],
       "discriminator": [
         253,
@@ -847,8 +869,8 @@
           {
             "name": "account_keys",
             "docs": [
-              "Static account keys. By convention, the multisig PDA must be at index 0",
-              "as the canonical writable signer."
+              "Static account keys. By convention, the vault PDA must be at index 0",
+              "as the canonical writable signer (enforced in `create_transaction`)."
             ],
             "type": {
               "vec": "pubkey"

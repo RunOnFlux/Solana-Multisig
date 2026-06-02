@@ -10,6 +10,7 @@ import {
   TransactionMessage as Web3TransactionMessage,
   VersionedTransaction,
   AddressLookupTableProgram,
+  NonceAccount,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import * as anchor from "@coral-xyz/anchor";
@@ -856,6 +857,85 @@ export class SolanaMultisigClient {
       })
       .instruction();
     return { instruction, nonceAccount };
+  }
+
+  /**
+   * Fetch the durable nonce account for `multisigAddress` and return its
+   * on-chain authority + current nonce value, or `null` if not yet provisioned.
+   *
+   * SSP-01 race-recovery helper. Because `provision_nonce` is permissionless
+   * and the nonce address is deterministic, an attacker who front-runs a
+   * standalone provision_nonce becomes the authority and can grief the
+   * durable-nonce flow (refuse advance, drain rent). Wallets MUST call this
+   * before relying on the nonce and verify `authority.equals(expected)`;
+   * if not, fall back to live-blockhash signing — vault funds are safe in
+   * either case, only the offline-sign convenience is lost.
+   */
+  async getNonceAuthority(opts: {
+    multisigAddress: PublicKey;
+  }): Promise<{
+    nonceAccount: PublicKey;
+    authority: PublicKey;
+    nonceValue: string;
+  } | null> {
+    const nonceAccount = await deriveNonceAccount(opts.multisigAddress);
+    const accountInfo = await this.connection.getAccountInfo(nonceAccount);
+    if (!accountInfo) return null;
+    const state = NonceAccount.fromAccountData(accountInfo.data);
+    return {
+      nonceAccount,
+      authority: state.authorizedPubkey,
+      nonceValue: state.nonce,
+    };
+  }
+
+  /**
+   * SSP-01 (nonce-authority race) fallback entry point. This is the runtime
+   * guard for a race that CANNOT be fixed on-chain: Solana only treats a tx as
+   * durable-nonce when its top-level ix[0] is a System-Program nonceAdvance
+   * signed by the nonce authority, so the authority MUST be a single keypair —
+   * a multisig PDA can't sign a top-level ix, making the "PDA-as-authority"
+   * fix architecturally impossible (see `provision_nonce` in the on-chain
+   * program for the full writeup). The race is non-custodial: a front-run
+   * nonce authority can never move vault funds (those are gated solely by the
+   * M-of-N threshold), it can only grief the durable-nonce convenience. This
+   * check makes even that fully recoverable.
+   *
+   * Convenience predicate around {@link getNonceAuthority}. Returns:
+   *   - `{ status: "unprovisioned" }` — nothing on chain yet (no race possible)
+   *   - `{ status: "ok",    nonceAccount, nonceValue }` — authority matches expected
+   *   - `{ status: "raced", nonceAccount, actualAuthority }` — front-run; do
+   *     NOT use the durable-nonce path, fall back to a live blockhash (funds
+   *     are safe either way, only the offline-sign convenience is lost)
+   *
+   * Call this once at session start (or before each pre-sign) when using the
+   * durable-nonce flow. Cheap (one RPC call), prevents wasted work on griefed
+   * multisigs.
+   */
+  async checkNonceRace(opts: {
+    multisigAddress: PublicKey;
+    expectedAuthority: PublicKey;
+  }): Promise<
+    | { status: "unprovisioned" }
+    | { status: "ok"; nonceAccount: PublicKey; nonceValue: string }
+    | { status: "raced"; nonceAccount: PublicKey; actualAuthority: PublicKey }
+  > {
+    const info = await this.getNonceAuthority({
+      multisigAddress: opts.multisigAddress,
+    });
+    if (!info) return { status: "unprovisioned" };
+    if (info.authority.equals(opts.expectedAuthority)) {
+      return {
+        status: "ok",
+        nonceAccount: info.nonceAccount,
+        nonceValue: info.nonceValue,
+      };
+    }
+    return {
+      status: "raced",
+      nonceAccount: info.nonceAccount,
+      actualAuthority: info.authority,
+    };
   }
 
   /**

@@ -661,14 +661,70 @@ pub mod solana_multisig {
     /// which clients should treat as success — the nonce is already
     /// available).
     ///
-    /// SECURITY (race): because the nonce address is deterministic and this
+    /// ────────────────────────────────────────────────────────────────────
+    /// SSP-01 — Nonce-authority race (self-identified, Medium severity).
+    ///
+    /// This is documented at length because it reads like a vulnerability but
+    /// is, for custody purposes, a non-issue. Read this before attempting to
+    /// "fix" it — the obvious fix is architecturally impossible on Solana, and
+    /// the residual risk is a narrow, non-custodial, fully-recoverable griefing
+    /// window that the production flow never even opens.
+    ///
+    /// THE RACE. Because the nonce address is deterministic and this
     /// instruction is permissionless, sending it as a *standalone* tx lets an
-    /// attacker front-run the legitimate paymaster and become the nonce
-    /// authority. That cannot touch vault funds, but it can grief the
-    /// durable-nonce convenience flow (advance/withdraw the nonce, withhold
-    /// authority). Production callers MUST bundle init + provision atomically
-    /// in a single tx (see the SDK's `setupMultisigAndNonce`) so no third
-    /// party can interleave between the two.
+    /// attacker who watches for a fresh multisig front-run the legitimate
+    /// paymaster and become the nonce account's authority.
+    ///
+    /// WHY FUNDS ARE NEVER AT RISK. The nonce account is a separate
+    /// System-owned account; its authority controls only the standard durable-
+    /// nonce operations on that one account (advance / withdraw its rent /
+    /// reauthorize). Vault spend authority is completely independent — it is
+    /// gated solely by the M-of-N threshold check in `execute_transaction`
+    /// (`transaction.approvals.len() >= multisig.threshold`), where the vault
+    /// PDA signs via `invoke_signed` over seeds
+    /// [VAULT_PDA_SEED, multisig, vault_index, vault_bump]. The nonce authority
+    /// is never read on that path. A race winner therefore CANNOT move vault
+    /// funds, impersonate a member, forge approvals, mutate the (immutable)
+    /// member set, redirect a CPI destination, or block live-blockhash sends.
+    /// The worst reachable outcome is griefing the durable-nonce *convenience*
+    /// (advance/withdraw the nonce, withhold authority), which only forces
+    /// clients to fall back to live-blockhash signing. No loss of custody is
+    /// reachable through this account.
+    ///
+    /// WHY THE "MAKE THE MULTISIG PDA THE NONCE AUTHORITY" FIX IS IMPOSSIBLE
+    /// (not a missing TODO — a property of Solana's runtime):
+    ///   • The runtime classifies a tx as durable-nonce ONLY when its first
+    ///     top-level instruction is a System-Program `AdvanceNonceAccount`
+    ///     signed by the nonce authority. `SanitizedMessage::get_durable_nonce`
+    ///     inspects message instruction[0] for the System Program id and the
+    ///     `AdvanceNonceAccount` discriminant ([4,0,0,0]) at tx-load time and
+    ///     NEVER recurses into CPIs / inner instructions.
+    ///   • A PDA has no private key; it can only "sign" via `invoke_signed`
+    ///     inside a CPI, so it can never be a *top-level* signer — and
+    ///     `advance_nonce_account` requires the authority to be in the
+    ///     top-level signer set. A PDA authority is thus unsatisfiable.
+    ///   • Wrapping `AdvanceNonceAccount` in this program (so the PDA could
+    ///     sign it via `invoke_signed`) makes instruction[0]'s program id OUR
+    ///     program, so the runtime stops treating the tx as durable-nonce and
+    ///     validates the stored nonce as an ordinary recent blockhash →
+    ///     "Blockhash not found". Confirmed empirically on devnet.
+    /// Durable nonces therefore REQUIRE a single ed25519 keypair (the paymaster)
+    /// as authority by construction. The only true "removal" of the race is to
+    /// drop durable nonces and re-fetch a live blockhash + re-sign — which is
+    /// exactly the SDK fallback below, at the cost of reintroducing the ~60s
+    /// blockhash-expiry window this flow exists to eliminate.
+    ///
+    /// MITIGATIONS SHIPPED (defense in depth):
+    ///   1. PRIMARY — production callers bundle init + provision atomically in
+    ///      one tx (SDK `setupMultisigAndNonce`), so no third party can
+    ///      interleave between init and provision. This closes the window
+    ///      entirely; the standalone path here exists only for tests.
+    ///   2. FALLBACK — before relying on the nonce, clients call the SDK's
+    ///      `checkNonceRace({ multisigAddress, expectedAuthority })`. On a
+    ///      "raced" result the wallet simply signs with a live blockhash
+    ///      instead of the durable nonce. Funds are safe either way; only the
+    ///      offline-sign convenience is affected.
+    /// ────────────────────────────────────────────────────────────────────
     pub fn provision_nonce(ctx: Context<ProvisionNonce>) -> Result<()> {
         // Derive the multisig PDA's signer seeds so SystemProgram's
         // create_account_with_seed will accept invoke_signed for "base".

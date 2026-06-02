@@ -1,6 +1,6 @@
 {
   "name": "@runonflux/solana-multisig",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "TypeScript SDK for SSP Solana Multisig",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
