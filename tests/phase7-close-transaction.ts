@@ -223,7 +223,69 @@ describe("Phase 7: close_transaction", () => {
     expect(balAfter - balBefore).to.be.greaterThan(rentLocked - 100_000);
   });
 
-  it("rejects close when proposal has not been executed", async () => {
+  it("lets the payer reclaim an unexecuted proposal (rent refunded)", async () => {
+    // §10 hygiene change: the payer (typically the relay paymaster) may close a
+    // proposal that will never execute — e.g. an abandoned split-flow proposal —
+    // to recover the ~0.007 SOL rent it fronted. Closing regardless of `executed`
+    // is fund-safe: landed approvals alone cannot move funds (the threshold check
+    // lives in execute_transaction), and PDA re-init at the same index is
+    // impossible because the multisig's index counter only advances.
+    const { members, multisig, vault } = await setupMultisig({
+      memberCount: 3,
+      threshold: 2,
+      preFundVaultLamports: 0.5 * LAMPORTS_PER_SOL,
+    });
+    const recipient = Keypair.generate();
+    const message = buildSolTransferMessage(
+      vault,
+      recipient.publicKey,
+      0.01 * LAMPORTS_PER_SOL
+    );
+    const { pda, index } = await nextTransactionPda(multisig);
+    await program.methods
+      .createTransaction(0, message as any)
+      .accountsPartial({
+        multisig,
+        transaction: pda,
+        creator: members[0].publicKey,
+        payer: members[0].publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([members[0]])
+      .rpc();
+
+    // Proposal exists but was never executed.
+    const acc = await provider.connection.getAccountInfo(pda);
+    expect(acc).to.not.be.null;
+    const rentLocked = acc!.lamports;
+    expect(rentLocked).to.be.greaterThan(0);
+
+    const balBefore = await provider.connection.getBalance(
+      members[0].publicKey
+    );
+
+    // Payer closes the unexecuted proposal — must succeed now.
+    await program.methods
+      .closeTransaction(new anchor.BN(index.toString()))
+      .accountsPartial({
+        multisig,
+        transaction: pda,
+        payer: members[0].publicKey,
+      })
+      .signers([members[0]])
+      .rpc();
+
+    // Account is closed and rent swept back to the payer.
+    const accAfter = await provider.connection.getAccountInfo(pda);
+    expect(accAfter).to.be.null;
+    const balAfter = await provider.connection.getBalance(members[0].publicKey);
+    expect(balAfter - balBefore).to.be.greaterThan(rentLocked - 100_000);
+  });
+
+  it("rejects close of an unexecuted proposal by a non-payer", async () => {
+    // The payer-only gate (has_one = payer) still protects a live proposal:
+    // a third party cannot grief it by destroying its accumulated approvals,
+    // even before execution.
     const { members, multisig, vault } = await setupMultisig({
       memberCount: 3,
       threshold: 2,
@@ -255,15 +317,87 @@ describe("Phase 7: close_transaction", () => {
         .accountsPartial({
           multisig,
           transaction: pda,
-          payer: members[0].publicKey,
+          payer: members[1].publicKey, // not the original payer
         })
-        .signers([members[0]])
+        .signers([members[1]])
         .rpc();
     } catch (e) {
       threw = true;
-      expect(String(e)).to.match(/NotExecuted|not yet executed/i);
+      expect(String(e)).to.match(
+        /UnauthorizedCloser|original payer|ConstraintHasOne/i
+      );
     }
     expect(threw).to.equal(true);
+
+    // Proposal must survive the rejected close attempt.
+    const accAfter = await provider.connection.getAccountInfo(pda);
+    expect(accAfter).to.not.be.null;
+  });
+
+  it("lets the payer close an unexecuted proposal that has partial approvals", async () => {
+    // Approvals below threshold are landed on-chain but the proposal is still
+    // unexecuted. The payer may still reclaim it; discarding sub-threshold
+    // approvals is fund-safe.
+    const { members, multisig, vault } = await setupMultisig({
+      memberCount: 3,
+      threshold: 2,
+      preFundVaultLamports: 0.5 * LAMPORTS_PER_SOL,
+    });
+    const recipient = Keypair.generate();
+    const message = buildSolTransferMessage(
+      vault,
+      recipient.publicKey,
+      0.01 * LAMPORTS_PER_SOL
+    );
+    const { pda, index } = await nextTransactionPda(multisig);
+    await program.methods
+      .createTransaction(0, message as any)
+      .accountsPartial({
+        multisig,
+        transaction: pda,
+        creator: members[0].publicKey,
+        payer: members[0].publicKey,
+        systemProgram: SystemProgram.programId,
+      })
+      .signers([members[0]])
+      .rpc();
+
+    // Land ONE approval (threshold is 2) — proposal stays unexecuted.
+    await program.methods
+      .approveTransaction(new anchor.BN(index.toString()))
+      .accountsPartial({
+        multisig,
+        transaction: pda,
+        member: members[0].publicKey,
+      })
+      .signers([members[0]])
+      .rpc();
+
+    // Confirm the proposal is unexecuted but has a partial approval.
+    const txAcc = await (program.account as any).vaultTransaction.fetch(pda);
+    expect(txAcc.executed).to.equal(false);
+    expect(txAcc.approvals.length).to.equal(1);
+
+    const acc = await provider.connection.getAccountInfo(pda);
+    const rentLocked = acc!.lamports;
+    const balBefore = await provider.connection.getBalance(
+      members[0].publicKey
+    );
+
+    await program.methods
+      .closeTransaction(new anchor.BN(index.toString()))
+      .accountsPartial({
+        multisig,
+        transaction: pda,
+        payer: members[0].publicKey,
+      })
+      .signers([members[0]])
+      .rpc();
+
+    const accAfter = await provider.connection.getAccountInfo(pda);
+    expect(accAfter).to.be.null;
+    const balAfter = await provider.connection.getBalance(members[0].publicKey);
+    expect(balAfter - balBefore).to.be.greaterThan(rentLocked - 100_000);
   });
 
   it("rejects close by an account that is not the original payer", async () => {

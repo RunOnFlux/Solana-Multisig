@@ -7,7 +7,7 @@
  *
  *   1. PDA derivation matches between the two build steps (no drift)
  *   2. Bundled tx serializes to fewer than 1232 bytes (Solana wire budget)
- *      at the worst-case enterprise cap: M=3 dual mode
+ *      at the worst-case enterprise caps: M=2 dual / M=4 single mode
  *   3. Each designated member's ed25519 key can partial-sign the bundle
  *      and produce a verifiable sig at the expected slot
  *   4. After every member + paymaster signs, `verifySignatures()` returns true
@@ -326,8 +326,8 @@ async function main() {
   console.log(`Wire budget: ${WIRE_BUDGET_BYTES} bytes`);
   const results = [];
   // Worst-case enterprise caps from solanaVaultDerivationService:
-  //   sol_dual:   M ≤ 3
-  //   sol_single: M ≤ 7
+  //   sol_dual:   M ≤ 2
+  //   sol_single: M ≤ 4
   // Boundary cases — caps empirically validated below. Anything above
   // these must FAIL serialization (the test asserts both pass + fail
   // expectations).

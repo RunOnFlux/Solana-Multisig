@@ -601,18 +601,32 @@ pub mod solana_multisig {
         Ok(())
     }
 
-    /// Close an executed proposal account, refunding rent to the account that
-    /// originally funded it (`transaction.payer`).
+    /// Close a proposal account, refunding rent to the account that originally
+    /// funded it (`transaction.payer`).
     ///
-    /// Garbage collection: the proposal has done its job (coordinated
-    /// approvals, gated execution) and is read-only history afterwards. Closing
-    /// recovers the ~0.007 SOL rent. Wallets typically bundle this into the
-    /// same outer tx as `execute_transaction` so close is atomic with execute.
+    /// Two paths converge here, both gated to the original payer by Anchor's
+    /// `has_one = payer` constraint (the signer MUST equal the stored payer):
+    ///   1. Garbage collection after execution: the proposal has done its job
+    ///      (coordinated approvals, gated execution) and is read-only history.
+    ///      Wallets typically bundle this into the same outer tx as
+    ///      `execute_transaction` so close is atomic with execute.
+    ///   2. Reclaim of an unexecuted/abandoned proposal: the payer (typically
+    ///      the relay paymaster who fronted the rent) recovers the ~0.007 SOL
+    ///      rent of a proposal that will never execute (rejected/expired/
+    ///      cancelled split proposals — see SOLANA_SPLIT_APPROVAL_PLAN §10).
+    ///
+    /// Closing regardless of `executed` is sound: PDA re-init at the same index
+    /// is impossible (the multisig's index counter only advances), so a closed
+    /// account can never be resurrected to replay stale approvals. Landed
+    /// on-chain approvals alone can never move funds (the threshold check lives
+    /// in `execute_transaction`), so discarding an unexecuted proposal's
+    /// approvals is fund-safe. The payer-only gate prevents third parties from
+    /// griefing a live proposal by destroying its accumulated approvals.
     ///
     /// Constraints (most enforced via Anchor account constraints):
-    ///   - proposal must be executed (executed = true)
     ///   - signer must equal stored `transaction.payer` (has_one)
     ///   - rent refunds to payer (close = payer)
+    ///   - executed state is NOT required (either path is allowed)
     pub fn close_transaction(ctx: Context<CloseTransaction>, transaction_index: u64) -> Result<()> {
         let multisig = &ctx.accounts.multisig;
         let transaction = &ctx.accounts.transaction;
@@ -627,13 +641,20 @@ pub mod solana_multisig {
             transaction_index,
             ErrorCode::InvalidTransactionIndex
         );
-        require!(transaction.executed, ErrorCode::NotExecuted);
 
-        msg!(
-            "✅ Transaction {} closed; rent refunded to payer {}",
-            transaction_index,
-            ctx.accounts.payer.key()
-        );
+        if transaction.executed {
+            msg!(
+                "✅ Transaction {} closed after execution; rent refunded to payer {}",
+                transaction_index,
+                ctx.accounts.payer.key()
+            );
+        } else {
+            msg!(
+                "✅ Transaction {} reclaimed unexecuted; rent refunded to payer {}",
+                transaction_index,
+                ctx.accounts.payer.key()
+            );
+        }
 
         Ok(())
     }
