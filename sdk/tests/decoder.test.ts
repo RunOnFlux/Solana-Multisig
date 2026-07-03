@@ -83,6 +83,10 @@ async function buildBundle(opts: {
   innerInstructions: TransactionInstruction[];
   includeAtaCreate?: boolean;
   extraOuterInstructions?: TransactionInstruction[];
+  /** Make the approve_transaction ix(s) target a DIFFERENT proposal PDA. */
+  approveTargetOverride?: PublicKey;
+  /** Fund the ATA-create with this account instead of the paymaster. */
+  ataFunder?: PublicKey;
 }): Promise<BundleFixture> {
   const nonceAccount = await deriveNonceAccount(multisigAddress);
   const nonceAdvanceIx = SystemProgram.nonceAdvance({
@@ -113,7 +117,7 @@ async function buildBundle(opts: {
     approveIxs.push(
       await client.buildApproveTransactionInstruction({
         multisigAddress,
-        transactionAddress,
+        transactionAddress: opts.approveTargetOverride ?? transactionAddress,
         transactionIndex,
         member: member.publicKey,
       })
@@ -148,7 +152,11 @@ async function buildBundle(opts: {
       new TransactionInstruction({
         programId: ATA_PROGRAM_ID,
         keys: [
-          { pubkey: paymaster.publicKey, isSigner: true, isWritable: true },
+          {
+            pubkey: opts.ataFunder ?? paymaster.publicKey,
+            isSigner: true,
+            isWritable: true,
+          },
           {
             pubkey: deriveAssociatedTokenAddress(
               recipientOwner.publicKey,
@@ -340,6 +348,7 @@ describe("decodeVaultSolanaTransaction", function () {
           amount: NATIVE_AMOUNT.toString(),
         },
       ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(compared.ok, true);
     assert.deepEqual(compared.mismatches, []);
@@ -386,6 +395,7 @@ describe("decodeVaultSolanaTransaction", function () {
         },
       ],
       tokenMint: mint.toBase58(),
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(compared.ok, true);
 
@@ -435,6 +445,7 @@ describe("decodeVaultSolanaTransaction", function () {
     const compared = compareDecodedToExpected(decoded, {
       recipients: [{ address: destAta, amount: SPL_AMOUNT.toString() }],
       tokenMint: mint.toBase58(), // mint not comparable (absent on the wire)
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(compared.ok, true);
   });
@@ -449,8 +460,27 @@ describe("decodeVaultSolanaTransaction", function () {
     assert.deepEqual(decoded.approvers, [keyMember.publicKey.toBase58()]);
     assert.deepEqual(decoded.unknownOuterPrograms, []);
 
-    const compared = compareDecodedToExpected(decoded, { recipients: [] });
-    assert.equal(compared.ok, true);
+    // Fail-closed: an approve-only bundle carries no message, so it can't be
+    // content-verified from its bytes — the gate rejects by default.
+    const blind = compareDecodedToExpected(decoded, { recipients: [] });
+    assert.equal(blind.ok, false);
+    assert.ok(blind.mismatches.some((m) => m.includes("approve-only")));
+
+    // Caller asserts it verified the on-chain proposal + binds the target → ok.
+    const acked = compareDecodedToExpected(decoded, {
+      recipients: [],
+      approveOnlyVerifiedOnChain: true,
+      expectedTransactionPda: transactionAddress.toBase58(),
+    });
+    assert.equal(acked.ok, true);
+
+    // Acknowledged, but the approve targets a DIFFERENT proposal than expected.
+    const wrongTarget = compareDecodedToExpected(decoded, {
+      recipients: [],
+      approveOnlyVerifiedOnChain: true,
+      expectedTransactionPda: Keypair.generate().publicKey.toBase58(),
+    });
+    assert.equal(wrongTarget.ok, false);
   });
 
   it("(e) flags a foreign outer instruction (leaf-key-drain guard)", async function () {
@@ -479,6 +509,7 @@ describe("decodeVaultSolanaTransaction", function () {
           amount: NATIVE_AMOUNT.toString(),
         },
       ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(compared.ok, false);
     assert.ok(
@@ -516,11 +547,12 @@ describe("decodeVaultSolanaTransaction", function () {
     const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
     assert.equal(decoded.kind, "create");
 
-    // Tampered amount.
+    // Tampered amount. (maxFeeLamports set so the fee is not itself a mismatch.)
     const wrongAmount = compareDecodedToExpected(decoded, {
       recipients: [
         { address: recipientOwner.publicKey.toBase58(), amount: "1" },
       ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(wrongAmount.ok, false);
     assert.equal(wrongAmount.mismatches.length, 2); // expected-not-found + decoded-not-expected
@@ -533,11 +565,15 @@ describe("decodeVaultSolanaTransaction", function () {
           amount: NATIVE_AMOUNT.toString(),
         },
       ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(wrongRecipient.ok, false);
 
     // Extra decoded recipient (expected list empty).
-    const extraDecoded = compareDecodedToExpected(decoded, { recipients: [] });
+    const extraDecoded = compareDecodedToExpected(decoded, {
+      recipients: [],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    });
     assert.equal(extraDecoded.ok, false);
     assert.ok(
       extraDecoded.mismatches.some((m) =>
@@ -550,6 +586,7 @@ describe("decodeVaultSolanaTransaction", function () {
       recipients: [
         { address: recipientOwner.publicKey.toBase58(), amount: "1.5" },
       ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(badAmount.ok, false);
   });
@@ -569,6 +606,7 @@ describe("decodeVaultSolanaTransaction", function () {
     const compared = compareDecodedToExpected(decoded, {
       recipients: [{ address: destAta, amount: SPL_AMOUNT.toString() }],
       tokenMint: Keypair.generate().publicKey.toBase58(),
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(compared.ok, false);
     assert.ok(
@@ -648,6 +686,7 @@ describe("decodeVaultSolanaTransaction", function () {
           amount: NATIVE_AMOUNT.toString(),
         },
       ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
     });
     assert.equal(compared.ok, false);
     assert.ok(
@@ -697,6 +736,227 @@ describe("decodeVaultSolanaTransaction", function () {
     assert.equal(
       decoded.recipients[0].address,
       recipientOwner.publicKey.toBase58()
+    );
+  });
+
+  // ---- Regression tests for the 2026-07 SDK audit fixes ----
+
+  it("(fix-crit) rejects a vault->fee-payer drain smuggled as an unbounded fee", async function () {
+    const DRAIN = BigInt(99_000_000);
+    const { base64 } = await buildBundle({
+      innerInstructions: [
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: recipientOwner.publicKey,
+          lamports: NATIVE_AMOUNT,
+        }),
+        // Hidden drain: vault -> fee payer for (almost) the whole balance.
+        SystemProgram.transfer({
+          fromPubkey: vaultPda,
+          toPubkey: paymaster.publicKey,
+          lamports: DRAIN,
+        }),
+      ],
+    });
+    const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
+    assert.equal(decoded.kind, "create");
+    if (decoded.kind !== "create") return;
+    // The drain is bucketed as fee and excluded from recipients...
+    assert.equal(decoded.recipients.length, 1);
+    assert.equal(decoded.feeLamports, DRAIN.toString());
+
+    const expected = {
+      recipients: [
+        {
+          address: recipientOwner.publicKey.toBase58(),
+          amount: NATIVE_AMOUNT.toString(),
+        },
+      ],
+    };
+
+    // ...but with a sane fee cap the gate now REJECTS it (the old code passed).
+    const capped = compareDecodedToExpected(decoded, {
+      ...expected,
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    });
+    assert.equal(capped.ok, false);
+    assert.ok(
+      capped.mismatches.some((m) => m.includes("exceeds the allowed maximum"))
+    );
+
+    // Default (no cap) is fail-closed: any fee rejects.
+    const defaulted = compareDecodedToExpected(decoded, expected);
+    assert.equal(defaulted.ok, false);
+
+    // Only an explicit cap >= the drain allows it (caller's eyes open).
+    const allowed = compareDecodedToExpected(decoded, {
+      ...expected,
+      maxFeeLamports: DRAIN.toString(),
+    });
+    assert.equal(allowed.ok, true);
+  });
+
+  it("(fix-crit2) rejects a fee paid to an unexpected fee payer", async function () {
+    const { base64 } = await buildBundle({
+      innerInstructions: nativeInnerInstructions(),
+    });
+    const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
+    assert.equal(decoded.kind, "create");
+    if (decoded.kind !== "create") return;
+    assert.equal(decoded.feePayer, paymaster.publicKey.toBase58());
+
+    const base = {
+      recipients: [
+        {
+          address: recipientOwner.publicKey.toBase58(),
+          amount: NATIVE_AMOUNT.toString(),
+        },
+      ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    };
+    const wrongPayer = compareDecodedToExpected(decoded, {
+      ...base,
+      expectedFeePayer: Keypair.generate().publicKey.toBase58(),
+    });
+    assert.equal(wrongPayer.ok, false);
+    assert.ok(
+      wrongPayer.mismatches.some((m) => m.includes("expected fee payer"))
+    );
+
+    const rightPayer = compareDecodedToExpected(decoded, {
+      ...base,
+      expectedFeePayer: paymaster.publicKey.toBase58(),
+    });
+    assert.equal(rightPayer.ok, true);
+  });
+
+  it("(fix-med) rejects a bundle whose approve targets a different proposal", async function () {
+    const bogusProposal = Keypair.generate().publicKey;
+    const { base64, transactionAddress } = await buildBundle({
+      innerInstructions: nativeInnerInstructions(),
+      approveTargetOverride: bogusProposal,
+    });
+    const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
+    assert.equal(decoded.kind, "create");
+    if (decoded.kind !== "create") return;
+    // The created proposal is transactionAddress, but the approves point elsewhere.
+    assert.equal(decoded.transactionPda, transactionAddress.toBase58());
+    assert.ok(
+      decoded.approveTargets.every((t) => t === bogusProposal.toBase58())
+    );
+
+    const compared = compareDecodedToExpected(decoded, {
+      recipients: [
+        {
+          address: recipientOwner.publicKey.toBase58(),
+          amount: NATIVE_AMOUNT.toString(),
+        },
+      ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    });
+    assert.equal(compared.ok, false);
+    assert.ok(
+      compared.mismatches.some((m) => m.includes("not the created proposal"))
+    );
+  });
+
+  it("(fix-med2) binds the created proposal to expectedTransactionPda", async function () {
+    const { base64, transactionAddress } = await buildBundle({
+      innerInstructions: nativeInnerInstructions(),
+    });
+    const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
+    const base = {
+      recipients: [
+        {
+          address: recipientOwner.publicKey.toBase58(),
+          amount: NATIVE_AMOUNT.toString(),
+        },
+      ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    };
+    const wrong = compareDecodedToExpected(decoded, {
+      ...base,
+      expectedTransactionPda: Keypair.generate().publicKey.toBase58(),
+    });
+    assert.equal(wrong.ok, false);
+    assert.ok(
+      wrong.mismatches.some((m) => m.includes("does not match expected"))
+    );
+
+    const right = compareDecodedToExpected(decoded, {
+      ...base,
+      expectedTransactionPda: transactionAddress.toBase58(),
+    });
+    assert.equal(right.ok, true);
+  });
+
+  it("(fix-info) flags an ATA-create funded by a non-fee-payer", async function () {
+    const { base64 } = await buildBundle({
+      innerInstructions: nativeInnerInstructions(),
+      includeAtaCreate: true,
+      ataFunder: walletMember.publicKey, // a member leaf, not the paymaster
+    });
+    const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
+    assert.equal(decoded.kind, "create");
+    if (decoded.kind !== "create") return;
+    assert.deepEqual(decoded.unknownOuterPrograms, [ATA_PROGRAM_ID.toBase58()]);
+
+    const compared = compareDecodedToExpected(decoded, {
+      recipients: [
+        {
+          address: recipientOwner.publicKey.toBase58(),
+          amount: NATIVE_AMOUNT.toString(),
+        },
+      ],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    });
+    assert.equal(compared.ok, false);
+  });
+
+  it("(fix-spl-auth) flags an SPL transfer not authorized by the vault", async function () {
+    const memberAta = deriveAssociatedTokenAddress(
+      walletMember.publicKey,
+      mint
+    );
+    const destAta = deriveAssociatedTokenAddress(
+      recipientOwner.publicKey,
+      mint
+    );
+    const data = Buffer.alloc(10);
+    data[0] = 12; // TransferChecked
+    data.writeBigUInt64LE(SPL_AMOUNT, 1);
+    data[9] = DECIMALS;
+    // Authority is a MEMBER leaf, not the vault -> the debit is not from the
+    // vault, so it must be flagged (fail-closed) rather than shown as a vault
+    // recipient — mirrors the native source==vault guard.
+    const badAuthIx = new TransactionInstruction({
+      programId: TOKEN_PROGRAM_ID,
+      keys: [
+        { pubkey: memberAta, isSigner: false, isWritable: true },
+        { pubkey: mint, isSigner: false, isWritable: false },
+        { pubkey: destAta, isSigner: false, isWritable: true },
+        { pubkey: walletMember.publicKey, isSigner: true, isWritable: false },
+      ],
+      data,
+    });
+    const { base64 } = await buildBundle({
+      innerInstructions: [badAuthIx, feeReimburseInstruction()],
+    });
+    const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
+    assert.equal(decoded.kind, "create");
+    if (decoded.kind !== "create") return;
+    assert.equal(decoded.recipients.length, 0);
+    assert.equal(decoded.unknownInnerInstructionCount, 1);
+
+    const compared = compareDecodedToExpected(decoded, {
+      recipients: [],
+      maxFeeLamports: FEE_LAMPORTS.toString(),
+    });
+    assert.equal(compared.ok, false);
+    assert.ok(
+      compared.mismatches.some((m) =>
+        m.includes("unrecognized inner instruction")
+      )
     );
   });
 });

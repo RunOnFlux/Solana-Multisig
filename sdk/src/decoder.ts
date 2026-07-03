@@ -110,9 +110,20 @@ export type DecodedVaultSolanaTx =
       /** Inner message account_keys[0] — by convention the vault PDA. */
       sender: string;
       recipients: DecodedSolanaVaultRecipient[];
-      /** Sum of inner native transfers whose destination is the fee payer. */
+      /**
+       * Sum of inner native transfers from the vault to the fee payer
+       * (reimbursements). NOT a recipient — `compareDecodedToExpected` bounds
+       * this against `maxFeeLamports` (default 0) so it can no longer hide an
+       * unbounded vault drain routed to the fee payer.
+       */
       feeLamports: string;
+      /** The outer transaction fee payer (destination of `feeLamports`), or null. */
+      feePayer: string | null;
       approvers: string[];
+      /** Proposal PDA each bundled `approve_transaction` targets (keys[1]). */
+      approveTargets: string[];
+      /** Proposal PDA each bundled `execute_transaction` targets (keys[1]). */
+      executeTargets: string[];
       /** Inner instructions the decoder could not classify (fail-closed). */
       unknownInnerInstructionCount: number;
       /** Outer instructions outside the allowlist — leaf-key-drain guard. */
@@ -123,6 +134,8 @@ export type DecodedVaultSolanaTx =
       multisigPda: string;
       transactionPda: string;
       approvers: string[];
+      /** Proposal PDA each `approve_transaction` targets (keys[1]). */
+      approveTargets: string[];
       unknownOuterPrograms: string[];
     }
   | { kind: "undecodable"; error: string };
@@ -290,6 +303,7 @@ export function decodeVaultSolanaTransaction(
     const unknownOuterPrograms: string[] = [];
     let createIx: { keys: PublicKey[]; inner: InnerMessage } | null = null;
     const approveIxs: { keys: PublicKey[] }[] = [];
+    const executeTargets: string[] = [];
 
     for (const ix of tx.instructions) {
       const pid = ix.programId;
@@ -305,7 +319,15 @@ export function decodeVaultSolanaTransaction(
         }
         unknownOuterPrograms.push(pid.toBase58());
       } else if (pid.equals(ATA_PROGRAM_ID)) {
-        // createAssociatedTokenAccountIdempotent (paymaster-funded ATA rent).
+        // createAssociatedTokenAccount(Idempotent). A partial member signature
+        // authorizes EVERY outer ix, so the rent FUNDER (keys[0]) must be the
+        // fee payer / paymaster — otherwise a member leaf could be named as
+        // funder and drained of its own lamports. Flag any other funder.
+        const ataFunder =
+          ix.keys.length > 0 ? ix.keys[0].pubkey.toBase58() : undefined;
+        if (paymaster && ataFunder && ataFunder !== paymaster) {
+          unknownOuterPrograms.push(pid.toBase58());
+        }
         continue;
       } else if (pid.equals(programId)) {
         const disc = Uint8Array.from(data.subarray(0, 8));
@@ -319,11 +341,17 @@ export function decodeVaultSolanaTransaction(
           };
         } else if (bytesEqual(disc, APPROVE_TRANSACTION_DISCRIMINATOR)) {
           approveIxs.push({ keys: ix.keys.map((k) => k.pubkey) });
-        } else if (
-          bytesEqual(disc, EXECUTE_TRANSACTION_DISCRIMINATOR) ||
-          bytesEqual(disc, CLOSE_TRANSACTION_DISCRIMINATOR)
-        ) {
-          // Allowed — execute/close move nothing beyond the create message.
+        } else if (bytesEqual(disc, EXECUTE_TRANSACTION_DISCRIMINATOR)) {
+          // execute_transaction accounts: { multisig, transaction, executor }.
+          // Capture its target proposal PDA (keys[1]) so the comparison can
+          // bind it to the created / expected proposal (a swapped execute would
+          // otherwise run a DIFFERENT proposal than the one shown).
+          if (ix.keys.length >= 2) {
+            executeTargets.push(ix.keys[1].pubkey.toBase58());
+          }
+        } else if (bytesEqual(disc, CLOSE_TRANSACTION_DISCRIMINATOR)) {
+          // close_transaction only refunds rent to its stored payer (has_one) —
+          // no fund movement to verify.
           continue;
         } else {
           // Multisig program with an unrecognized discriminator — fail closed.
@@ -335,12 +363,18 @@ export function decodeVaultSolanaTransaction(
     }
 
     // Approve ix accounts: { multisig, transaction, member } (IDL order).
-    const approvers = approveIxs.map((a) => {
+    // keys[1] = the proposal PDA the approval targets; keys[2] = the approving
+    // member. Capture both — the target binds the signature to a specific
+    // proposal (checked in compareDecodedToExpected).
+    const approvers: string[] = [];
+    const approveTargets: string[] = [];
+    for (const a of approveIxs) {
       if (a.keys.length < 3) {
         throw new Error("approve_transaction instruction has too few accounts");
       }
-      return a.keys[2].toBase58();
-    });
+      approveTargets.push(a.keys[1].toBase58());
+      approvers.push(a.keys[2].toBase58());
+    }
 
     if (createIx) {
       // Create ix accounts: { multisig, transaction, creator, payer,
@@ -383,9 +417,21 @@ export function decodeVaultSolanaTransaction(
             cix.accountIndexes.length >= 2
           ) {
             // SystemProgram transfer: accounts [from, to].
+            const source = resolve(cix.accountIndexes[0]);
             const dest = resolve(cix.accountIndexes[1]).toBase58();
             const amount = readU64LE(d, 4);
-            if (paymaster && dest === paymaster) {
+            // Only the vault (account_keys[0]) can be debited here — it is the
+            // sole invoke_signed signer at execute, so a native transfer whose
+            // SOURCE is not the vault would fail on-chain. Treat any non-vault
+            // source as unclassifiable (fail-closed) rather than trusting its
+            // destination/amount — this stops a transfer being mislabeled as a
+            // vault outflow (or fee) when it isn't one.
+            if (!source.equals(inner.accountKeys[0])) {
+              unknownInnerInstructionCount++;
+            } else if (paymaster && dest === paymaster) {
+              // Vault -> fee payer: a reimbursement, bucketed separately. This
+              // is BOUNDED by compareDecodedToExpected (maxFeeLamports), so it
+              // can no longer smuggle an unbounded vault drain to the fee payer.
               feeLamports += amount;
             } else {
               recipients.push({
@@ -402,15 +448,24 @@ export function decodeVaultSolanaTransaction(
           ) {
             // TransferChecked: accounts [source, mint, dest, authority];
             // data [tag u8, amount u64, decimals u8].
-            const dest = resolve(cix.accountIndexes[2]).toBase58();
-            recipients.push({
-              address: dest,
-              ata: dest,
-              amount: readU64LE(d, 1).toString(),
-              asset: "spl",
-              mint: resolve(cix.accountIndexes[1]).toBase58(),
-              decimals: d[9],
-            });
+            // The AUTHORITY (accountIndexes[3]) must be the vault — the vault
+            // PDA is the only invoke_signed signer at execute, so a transfer
+            // authorized by anyone else debits a NON-vault token account (e.g.
+            // a member leaf's own). Mirror the native source==vault guard and
+            // fail closed rather than mis-attributing it as a vault outflow.
+            if (!resolve(cix.accountIndexes[3]).equals(inner.accountKeys[0])) {
+              unknownInnerInstructionCount++;
+            } else {
+              const dest = resolve(cix.accountIndexes[2]).toBase58();
+              recipients.push({
+                address: dest,
+                ata: dest,
+                amount: readU64LE(d, 1).toString(),
+                asset: "spl",
+                mint: resolve(cix.accountIndexes[1]).toBase58(),
+                decimals: d[9],
+              });
+            }
           } else if (
             isTokenProgram &&
             d.length === 9 &&
@@ -419,13 +474,18 @@ export function decodeVaultSolanaTransaction(
           ) {
             // Legacy Transfer: accounts [source, dest, authority];
             // data [tag u8, amount u64]. No mint/decimals on the wire.
-            const dest = resolve(cix.accountIndexes[1]).toBase58();
-            recipients.push({
-              address: dest,
-              ata: dest,
-              amount: readU64LE(d, 1).toString(),
-              asset: "spl",
-            });
+            // AUTHORITY (accountIndexes[2]) must be the vault — see above.
+            if (!resolve(cix.accountIndexes[2]).equals(inner.accountKeys[0])) {
+              unknownInnerInstructionCount++;
+            } else {
+              const dest = resolve(cix.accountIndexes[1]).toBase58();
+              recipients.push({
+                address: dest,
+                ata: dest,
+                amount: readU64LE(d, 1).toString(),
+                asset: "spl",
+              });
+            }
           } else {
             unknownInnerInstructionCount++;
           }
@@ -471,7 +531,10 @@ export function decodeVaultSolanaTransaction(
         sender: inner.accountKeys[0].toBase58(),
         recipients,
         feeLamports: feeLamports.toString(),
+        feePayer: paymaster ?? null,
         approvers,
+        approveTargets,
+        executeTargets,
         unknownInnerInstructionCount,
         unknownOuterPrograms,
       };
@@ -483,6 +546,7 @@ export function decodeVaultSolanaTransaction(
         multisigPda: approveIxs[0].keys[0].toBase58(),
         transactionPda: approveIxs[0].keys[1].toBase58(),
         approvers,
+        approveTargets,
         unknownOuterPrograms,
       };
     }
@@ -512,16 +576,30 @@ function toBigIntOrNull(value: string): bigint | null {
 
 /**
  * Compare a decoded vault transaction against the relay-supplied display
- * payload. `ok: false` on a `create` decode means the bytes contradict the
- * payload — an active-attack indicator that callers should HARD-BLOCK on.
+ * payload. `ok: false` means the bytes contradict the payload (or cannot be
+ * fully verified) — an active-attack indicator that callers MUST HARD-BLOCK on.
  *
- * - kind "create": every expected recipient must appear in the decode with an
- *   exact base-unit amount match (BigInt compare, matching on owner-or-ata
- *   address); every decoded recipient must be expected (extras = mismatch);
- *   mint must equal expected.tokenMint when both present; any unknown outer
- *   program or unknown inner instruction = mismatch.
- * - kind "approve": ok iff unknownOuterPrograms is empty (amounts are not
- *   verifiable from approve bytes — callers display that state honestly).
+ * The gate is FAIL-CLOSED: every value that moves funds must be positively
+ * accounted for by `expected`, or the comparison rejects.
+ *
+ * - kind "create":
+ *     • every expected recipient must appear in the decode with an exact
+ *       base-unit amount match (matching on owner-or-ata address); every
+ *       decoded recipient must be expected (extras = mismatch);
+ *     • mint must equal expected.tokenMint when both present;
+ *     • the vault→fee-payer reimbursement (`feeLamports`) must be <=
+ *       `expected.maxFeeLamports` (DEFAULT 0 — any fee rejects unless the
+ *       caller explicitly allows it) and, if `expected.expectedFeePayer` is
+ *       set, be paid to that address. This closes the fee-laundering drain
+ *       where a relay routes vault funds to the fee payer;
+ *     • every bundled approve_transaction / execute_transaction must target the
+ *       created proposal (and `expected.expectedTransactionPda` when set), so a
+ *       signature cannot be harvested onto a different proposal;
+ *     • any unknown outer program or unknown inner instruction = mismatch.
+ * - kind "approve": an approve-only bundle carries NO proposal message, so its
+ *   fund movement is not verifiable from these bytes. Rejected unless the caller
+ *   sets `expected.approveOnlyVerifiedOnChain` (asserting it fetched and
+ *   verified the on-chain VaultTransaction at `expected.expectedTransactionPda`).
  * - kind "undecodable": never ok.
  */
 export function compareDecodedToExpected(
@@ -529,6 +607,28 @@ export function compareDecodedToExpected(
   expected: {
     recipients: Array<{ address: string; amount: string }>;
     tokenMint?: string;
+    /**
+     * Max lamports the vault may reimburse to the fee payer, summed over all
+     * fee transfers. DEFAULT 0 — any vault→fee-payer outflow rejects unless the
+     * caller sets this to the agreed network-fee/rent reimbursement. Never set
+     * it open-ended: this bound is what stops the fee bucket hiding a drain.
+     */
+    maxFeeLamports?: string | number | bigint;
+    /** If set, any fee reimbursement must be paid to this exact address. */
+    expectedFeePayer?: string;
+    /**
+     * The proposal PDA the approver is being shown. When set, the created
+     * proposal (kind:"create") or approve target (kind:"approve") must equal
+     * it, binding the signature to the displayed proposal.
+     */
+    expectedTransactionPda?: string;
+    /**
+     * Approve-only bundles have no message to verify. Set this ONLY after
+     * independently fetching the on-chain VaultTransaction at
+     * expectedTransactionPda and verifying its stored recipients/amounts;
+     * expectedTransactionPda is required alongside it.
+     */
+    approveOnlyVerifiedOnChain?: boolean;
   }
 ): { ok: boolean; mismatches: string[] } {
   if (decoded.kind === "undecodable") {
@@ -549,12 +649,98 @@ export function compareDecodedToExpected(
   }
 
   if (decoded.kind === "approve") {
+    // No proposal message in these bytes — bind the target if requested, then
+    // fail closed unless the caller asserts an on-chain verification.
+    for (const t of decoded.approveTargets) {
+      if (
+        expected.expectedTransactionPda &&
+        t !== expected.expectedTransactionPda
+      ) {
+        mismatches.push(
+          `approve_transaction targets ${t}, expected proposal ${expected.expectedTransactionPda}`
+        );
+      }
+    }
+    if (
+      expected.expectedTransactionPda &&
+      decoded.transactionPda !== expected.expectedTransactionPda
+    ) {
+      mismatches.push(
+        `approve targets proposal ${decoded.transactionPda}, expected ${expected.expectedTransactionPda}`
+      );
+    }
+    if (!expected.approveOnlyVerifiedOnChain) {
+      mismatches.push(
+        "approve-only transaction: the proposal message is not present in these bytes. Fetch the on-chain VaultTransaction at the target PDA, verify its recipients/amounts, then set approveOnlyVerifiedOnChain (with expectedTransactionPda) to approve."
+      );
+    } else if (!expected.expectedTransactionPda) {
+      mismatches.push(
+        "approveOnlyVerifiedOnChain set without expectedTransactionPda: cannot confirm which proposal was verified"
+      );
+    }
     return { ok: mismatches.length === 0, mismatches };
   }
+
+  // ---- kind: "create" ----
 
   if (decoded.unknownInnerInstructionCount > 0) {
     mismatches.push(
       `${decoded.unknownInnerInstructionCount} unrecognized inner instruction(s) in the transaction message`
+    );
+  }
+
+  // Bind every bundled approve/execute to the created proposal — a relay that
+  // swaps an approve/execute onto a DIFFERENT (e.g. abandoned) proposal than
+  // the one shown would otherwise harvest the deciding signature on it.
+  for (const t of decoded.approveTargets) {
+    if (t !== decoded.transactionPda) {
+      mismatches.push(
+        `approve_transaction targets ${t}, not the created proposal ${decoded.transactionPda}`
+      );
+    }
+  }
+  for (const t of decoded.executeTargets) {
+    if (t !== decoded.transactionPda) {
+      mismatches.push(
+        `execute_transaction targets ${t}, not the created proposal ${decoded.transactionPda}`
+      );
+    }
+  }
+  if (
+    expected.expectedTransactionPda &&
+    decoded.transactionPda !== expected.expectedTransactionPda
+  ) {
+    mismatches.push(
+      `created proposal ${decoded.transactionPda} does not match expected ${expected.expectedTransactionPda}`
+    );
+  }
+
+  // Bound the vault→fee-payer reimbursement. Any outflow beyond the explicit
+  // cap (default 0) is a mismatch — this is what stops the fee bucket smuggling
+  // an unbounded vault drain past the recipient check.
+  const decodedFee = toBigIntOrNull(decoded.feeLamports) ?? BigInt(0);
+  const maxFee =
+    expected.maxFeeLamports === undefined
+      ? BigInt(0)
+      : toBigIntOrNull(String(expected.maxFeeLamports));
+  if (maxFee === null) {
+    mismatches.push(
+      `invalid maxFeeLamports: ${String(expected.maxFeeLamports)}`
+    );
+  } else if (decodedFee > maxFee) {
+    mismatches.push(
+      `vault->fee-payer outflow of ${decodedFee.toString()} lamports exceeds the allowed maximum of ${maxFee.toString()}`
+    );
+  }
+  if (
+    decodedFee > BigInt(0) &&
+    expected.expectedFeePayer &&
+    decoded.feePayer !== expected.expectedFeePayer
+  ) {
+    mismatches.push(
+      `fee paid to ${decoded.feePayer ?? "unknown"}, expected fee payer ${
+        expected.expectedFeePayer
+      }`
     );
   }
 
