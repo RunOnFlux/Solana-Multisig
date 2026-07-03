@@ -223,6 +223,19 @@ pub mod solana_multisig {
             ErrorCode::InvalidMessage,
             "InvalidMessage: account_keys[0] must equal the vault PDA at vault_index"
         );
+        // The vault (index 0) must be a WRITABLE signer, not merely a signer.
+        // At execute time is_writable for a slot is `i < num_writable_signers`
+        // (writable signers occupy the front of account_keys), so with
+        // num_writable_signers == 0 the vault would be a READ-ONLY signer and
+        // every vault-sourced SystemProgram/SPL debit would fail inside
+        // invoke_signed — yielding a proposal that can be approved but never
+        // executed (rent only reclaimable via close_transaction). Reject such
+        // structurally un-executable proposals up front.
+        require_msg!(
+            message.num_writable_signers >= 1,
+            ErrorCode::InvalidMessage,
+            "InvalidMessage: num_writable_signers must be >= 1 (vault must be a writable signer)"
+        );
 
         // Detect duplicate account_keys (wasteful and likely a client bug).
         // Sort a copy and scan adjacent entries — O(n log n) instead of the
@@ -989,7 +1002,7 @@ pub struct CreateTransaction<'info> {
     #[account(
         init,
         payer = payer,
-        space = compute_proposal_space(&message),
+        space = compute_proposal_space(&message, multisig.members.len()),
         seeds = [
             b"transaction",
             multisig.key().as_ref(),
@@ -1201,16 +1214,22 @@ fn compute_multisig_space(member_count: usize) -> usize {
 }
 
 /// Compute the exact bytes a `VaultTransaction` account needs to hold a
-/// proposal carrying `message`. Anchor's `init` constraint reads this to
-/// allocate just-enough space, sidestepping the 10240-byte CPI realloc cap
-/// that `8 + VaultTransaction::INIT_SPACE` would hit (since INIT_SPACE
-/// expands to the worst case across all `#[max_len]` upper bounds).
+/// proposal carrying `message` for a multisig with `member_count` members.
+/// Anchor's `init` constraint reads this to allocate just-enough space,
+/// sidestepping the 10240-byte CPI realloc cap that `8 +
+/// VaultTransaction::INIT_SPACE` would hit (since INIT_SPACE expands to the
+/// worst case across all `#[max_len]` upper bounds).
 ///
-/// `approvals` is allocated at full `MAX_MEMBERS` capacity because it grows
-/// over the proposal's lifetime. Everything inside `message` is allocated
-/// to the actual length present at create time — proposals are immutable
-/// after creation, so the message vectors never grow.
-fn compute_proposal_space(message: &TransactionMessage) -> usize {
+/// `approvals` grows over the proposal's lifetime but is bounded by the
+/// multisig's member count: `approve_transaction` only ever pushes a member
+/// (membership-checked) and rejects duplicates, so `approvals.len()` can never
+/// exceed `member_count`. We therefore reserve exactly `member_count` slots
+/// instead of the `MAX_MEMBERS` worst case — always safe, and it drops
+/// per-proposal rent for the common small multisig (a 2-of-2 saves 28×32 = 896
+/// bytes ≈ 0.006 SOL of refundable rent deposit). Everything inside `message`
+/// is allocated to the actual length present at create time — proposals are
+/// immutable after creation, so the message vectors never grow.
+fn compute_proposal_space(message: &TransactionMessage, member_count: usize) -> usize {
     8                                       // anchor discriminator
     + 32                                    // multisig
     + 8                                     // transaction_index
@@ -1220,7 +1239,7 @@ fn compute_proposal_space(message: &TransactionMessage) -> usize {
     + 1                                     // vault_index
     + 1                                     // vault_bump
     + 1                                     // executed
-    + 4 + MAX_MEMBERS * 32                  // approvals (Vec<Pubkey>, full cap)
+    + 4 + member_count * 32                 // approvals (Vec<Pubkey>, bounded by members)
     + 1 + 1 + 1                             // num_signers / num_writable_*
     + 4 + message.account_keys.len() * 32   // account_keys
     + 4 + message

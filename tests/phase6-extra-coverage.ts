@@ -232,6 +232,54 @@ describe("Phase 6: Extra coverage", () => {
       expect(threw, "expected InvalidMessage").to.equal(true);
     });
 
+    it("rejects num_writable_signers = 0 (vault must be a writable signer)", async () => {
+      const { members, multisig, vault } = await setupMultisig({
+        memberCount: 3,
+        threshold: 2,
+        preFundVaultLamports: 0.1 * LAMPORTS_PER_SOL,
+      });
+      const recipient = Keypair.generate();
+      // Every OTHER header check passes (num_signers >= 1, account_keys[0] ==
+      // vault, num_writable_signers <= num_signers, num_writable_non_signers <=
+      // non-signer slots). Only the new num_writable_signers >= 1 guard rejects
+      // it — otherwise the vault would be a read-only signer and the proposal
+      // could be approved but never executed.
+      const message = {
+        numSigners: 1,
+        numWritableSigners: 0, // illegal: vault (index 0) must be writable
+        numWritableNonSigners: 1,
+        accountKeys: [vault, recipient.publicKey, SystemProgram.programId],
+        instructions: [
+          {
+            programIdIndex: 2,
+            accountIndexes: Buffer.from([0, 1]),
+            data: systemTransferData(1000),
+          },
+        ],
+        addressTableLookups: [],
+      };
+      const { pda } = await nextTransactionPda(multisig);
+
+      let threw = false;
+      try {
+        await program.methods
+          .createTransaction(0, message as any)
+          .accountsPartial({
+            multisig,
+            transaction: pda,
+            creator: members[0].publicKey,
+            payer: members[0].publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([members[0]])
+          .rpc();
+      } catch (e: any) {
+        threw = true;
+        expect(String(e)).to.match(/InvalidMessage/);
+      }
+      expect(threw, "expected InvalidMessage").to.equal(true);
+    });
+
     it("rejects num_writable_non_signers exceeding non-signer slots", async () => {
       const { members, multisig, vault } = await setupMultisig({
         memberCount: 3,
