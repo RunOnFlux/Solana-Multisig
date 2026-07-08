@@ -1,0 +1,129 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  # Integration job (validator-based) also runs nightly and on manual dispatch.
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Fast gate: the TypeScript SDK. Runs on every push/PR, no Solana toolchain
+  # needed. Includes the TS↔Rust parity suite (discriminators + PDA derivation).
+  # ---------------------------------------------------------------------------
+  sdk:
+    name: SDK (build + TS↔Rust parity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install SDK deps
+        working-directory: sdk
+        run: yarn install --frozen-lockfile
+
+      - name: Build SDK (tsc)
+        working-directory: sdk
+        run: yarn build
+
+      - name: TS↔Rust parity + decoder tests
+        working-directory: sdk
+        run: yarn test
+
+  # ---------------------------------------------------------------------------
+  # Program gate: build the Anchor program and prove the committed SDK IDL still
+  # matches it (the Rust side of the parity chain). Heavier — installs the Solana
+  # + Anchor toolchain — so it runs on push/PR but is cached.
+  # ---------------------------------------------------------------------------
+  program:
+    name: Program (anchor build + IDL parity)
+    runs-on: ubuntu-latest
+    env:
+      SOLANA_VERSION: "2.1.0"
+      ANCHOR_VERSION: "0.31.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo + build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor (avm)
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --force
+          avm install "$ANCHOR_VERSION"
+          avm use "$ANCHOR_VERSION"
+
+      # Correctness lints only (no formatting gate). Non-blocking until the
+      # existing warnings are triaged.
+      - name: clippy (non-blocking)
+        continue-on-error: true
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Anchor build (regenerates the IDL)
+        run: anchor build
+
+      - name: IDL parity — committed SDK IDL vs built program
+        run: node scripts/check-idl-parity.mjs
+
+  # ---------------------------------------------------------------------------
+  # Integration: full instruction-flow tests against a local validator. Slow and
+  # historically flaky on block-height expiry, so it does NOT gate PRs — it runs
+  # nightly and on manual dispatch. `test-reliable` gives each phase a fresh
+  # validator. Promote to a required check once it is consistently green.
+  # ---------------------------------------------------------------------------
+  integration:
+    name: Anchor integration (nightly / manual)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      SOLANA_VERSION: "2.1.0"
+      ANCHOR_VERSION: "0.31.1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Solana CLI
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor (avm)
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor avm --force
+          avm install "$ANCHOR_VERSION"
+          avm use "$ANCHOR_VERSION"
+
+      - name: Generate a local keypair for the validator
+        run: solana-keygen new --no-bip39-passphrase --force -o "$HOME/.config/solana/id.json"
+
+      - name: Install JS deps
+        run: yarn install --frozen-lockfile
+
+      - name: Anchor integration suite (fresh validator per phase)
+        run: anchor run test-reliable
