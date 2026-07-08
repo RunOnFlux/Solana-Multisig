@@ -50,7 +50,7 @@ jobs:
     name: Program (anchor build + IDL parity)
     runs-on: ubuntu-latest
     env:
-      SOLANA_VERSION: "2.1.0"
+      SOLANA_VERSION: "2.2.20"
       ANCHOR_VERSION: "0.31.1"
     steps:
       - uses: actions/checkout@v4
@@ -97,7 +97,7 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
-      SOLANA_VERSION: "2.1.0"
+      SOLANA_VERSION: "2.2.20"
       ANCHOR_VERSION: "0.31.1"
     steps:
       - uses: actions/checkout@v4
