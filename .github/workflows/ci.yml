@@ -52,6 +52,10 @@ jobs:
     env:
       SOLANA_VERSION: "2.2.20"
       ANCHOR_VERSION: "0.31.1"
+      # platform-tools bundling rustc 1.84.1 (matches local). A fresh Solana
+      # install otherwise defaults to older platform-tools whose rustc 1.79
+      # can't compile indexmap 2.12 ("requires rustc 1.82").
+      PLATFORM_TOOLS_VERSION: "v1.48"
     steps:
       - uses: actions/checkout@v4
 
@@ -81,7 +85,7 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Anchor build (regenerates the IDL)
-        run: anchor build
+        run: anchor build -- --tools-version "$PLATFORM_TOOLS_VERSION"
 
       - name: IDL parity — committed SDK IDL vs built program
         run: node scripts/check-idl-parity.mjs
@@ -99,6 +103,7 @@ jobs:
     env:
       SOLANA_VERSION: "2.2.20"
       ANCHOR_VERSION: "0.31.1"
+      PLATFORM_TOOLS_VERSION: "v1.48"
     steps:
       - uses: actions/checkout@v4
 

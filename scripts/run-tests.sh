@@ -70,7 +70,13 @@ trap cleanup EXIT INT TERM
 # 1. Build (skippable for fast re-runs)
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   echo "==> anchor build"
-  anchor build || { echo "build failed"; exit 1; }
+  # Pin the SBF platform-tools so CI (fresh Solana install) uses the same rustc
+  # as local. Defaults to v1.48 (rustc 1.84.1) — the local default — so this is
+  # a no-op outside CI. Override with PLATFORM_TOOLS_VERSION if needed.
+  anchor build -- --tools-version "${PLATFORM_TOOLS_VERSION:-v1.48}" || {
+    echo "build failed"
+    exit 1
+  }
 fi
 
 if [[ ! -f "$PROGRAM_SO" ]]; then
