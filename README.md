@@ -2,7 +2,13 @@
 
 A self-initiating Solana multisig program where the multisig address is **deterministically derived from members + threshold**. Anyone can derive the address before any on-chain action; anyone can pre-fund the vault; **registration is permissionless** — no member signatures are required at init because the canonical PDA can only ever store the canonical member set (sha256 binding). Fund safety is enforced by the threshold check on `create_transaction` / `approve_transaction` / `execute_transaction`, not on registration. This mirrors how Bitcoin P2WSH multisig works: the address IS the hash of the script.
 
-Devnet Program ID: `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX`
+| Network | Program ID |
+|---|---|
+| Devnet | `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX` |
+| Mainnet | `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r` (deploy pending — see `docs/MAINNET_RUNBOOK.md`) |
+
+Mainnet artifacts are built with `--features mainnet`, which swaps `declare_id!`
+to the mainnet address; the default build stays on the devnet ID.
 
 ## Why "self-initiating"
 
@@ -219,7 +225,7 @@ The program-level differences above are what actually distinguish this design.
 - ✅ Devnet deployed (program ID `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX`, IDL on-chain)
 - ✅ End-to-end smoke tests passing on devnet (SOL, SPL, 7-of-10, Jupiter format, bundled single-tx, decoupled-init)
 - ✅ Anchor test suite passing in isolated phase runs; multi-phase chained runs are flaky due to local validator load (use `bash scripts/run-tests.sh phase4` etc. per phase)
-- ⏳ Mainnet pending (separate keypair; gated on external audit)
+- ⏳ Mainnet deploy pending (separate keypair, ID `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r`; upgradeable — single-sig authority at launch, transfer to an SSP enterprise governance vault planned; see `docs/MAINNET_RUNBOOK.md`)
 
 ## License
 

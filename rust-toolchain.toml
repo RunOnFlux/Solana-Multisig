@@ -1,0 +1,8 @@
+# Pinned host toolchain. cargo-build-sbf ships its own platform-tools rustc for
+# the SBF target, but the host toolchain still compiles clippy lints, build
+# scripts, and anchor's IDL generation — leaving it floating on `stable` makes
+# builds (and any verifiable-build claim) non-reproducible over time. Bump this
+# deliberately, together with SOLANA_VERSION/ANCHOR_VERSION in CI.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]

@@ -19,7 +19,7 @@ Peer-ish requirements: `@solana/web3.js`, `@coral-xyz/anchor` (already direct de
 | Network | Program ID |
 |---|---|
 | Devnet | `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX` |
-| Mainnet | _coming soon_ |
+| Mainnet | `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r` (deploy pending) |
 
 ## Quick start
 

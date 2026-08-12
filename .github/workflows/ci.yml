@@ -52,12 +52,14 @@ jobs:
     env:
       SOLANA_VERSION: "2.2.20"
       ANCHOR_VERSION: "0.31.1"
+      RUST_VERSION: "1.95.0" # keep in sync with rust-toolchain.toml
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: "1.95.0" # `toolchain` input overrides the @stable ref; matches rust-toolchain.toml
           components: rustfmt, clippy
 
       - name: Cache cargo + build artifacts
@@ -80,10 +82,9 @@ jobs:
           avm install "$ANCHOR_VERSION"
           avm use "$ANCHOR_VERSION"
 
-      # Correctness lints only (no formatting gate). Non-blocking until the
-      # existing warnings are triaged.
-      - name: clippy (non-blocking)
-        continue-on-error: true
+      # Correctness lints only (no formatting gate). Blocking — the tree is
+      # clippy-clean as of the mainnet-prep hardening.
+      - name: clippy
         run: cargo clippy --all-targets -- -D warnings
 
       - name: Anchor build (regenerates the IDL)
@@ -91,6 +92,13 @@ jobs:
 
       - name: IDL parity — committed SDK IDL vs built program
         run: node scripts/check-idl-parity.mjs
+
+      # The mainnet artifact is built with `--features mainnet` (different
+      # declare_id!). A plain host-target check proves the cfg-gated code still
+      # compiles without paying for a second full SBF build. Runs AFTER the IDL
+      # parity gate so target/idl always reflects the default (devnet) build.
+      - name: cargo check (mainnet feature)
+        run: cargo check -p solana-multisig --features mainnet
 
   # ---------------------------------------------------------------------------
   # Integration: full instruction-flow tests against a local validator. Slow and
@@ -110,6 +118,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0" # matches rust-toolchain.toml
 
       - name: Cache cargo + build artifacts
         uses: Swatinem/rust-cache@v2

@@ -11,6 +11,13 @@ solana_multisig = "CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX"
 [programs.devnet]
 solana_multisig = "CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX"
 
+# Mainnet runs under a separate keypair + upgrade authority. Builds targeting
+# mainnet MUST pass `--features mainnet` so declare_id! matches this address
+# (enforced at deploy time by the loader: a mismatched declare_id makes every
+# instruction fail with DeclaredProgramIdMismatch). See docs/MAINNET_RUNBOOK.md.
+[programs.mainnet]
+solana_multisig = "SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r"
+
 [registry]
 url = "https://api.apr.dev"
 

@@ -6,6 +6,13 @@ use anchor_lang::system_program::{
     create_nonce_account_with_seed, CreateNonceAccountWithSeed,
 };
 
+// Program ID is cluster-dependent: mainnet runs under a separate keypair /
+// upgrade authority. Default (devnet/localnet) builds keep the historical ID so
+// `anchor build` + the IDL parity gate stay byte-identical; mainnet artifacts
+// are produced with `--features mainnet` (see docs/MAINNET_RUNBOOK.md).
+#[cfg(feature = "mainnet")]
+declare_id!("SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r");
+#[cfg(not(feature = "mainnet"))]
 declare_id!("CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX");
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -210,13 +217,31 @@ pub mod solana_multisig {
             ErrorCode::InvalidMessage,
             "InvalidMessage: num_writable_non_signers > non-signer slots"
         );
-        // The vault PDA must be the first signer (index 0). Any instruction
-        // that moves vault funds references index 0; we sign for it via PDA
-        // using the vault's seeds at execute time.
+        // The vault PDA must be the SOLE signer, at index 0.
+        //
+        // SECURITY (signer-borrow prevention): at execute time a CPI account's
+        // is_signer flag is taken from this stored header (is_signer = index <
+        // num_signers). The only signature this program supplies via
+        // invoke_signed is the vault's (its seeds). Any OTHER account marked as
+        // a signer here would, at execute, borrow the top-level signature of
+        // whoever signs the outer execute_transaction tx — in the SSP model the
+        // relay paymaster (fee payer) and/or the executor. A proposal could then
+        // reference the paymaster in a signer slot and CPI e.g.
+        // SystemProgram::transfer{from: paymaster} or SystemProgram::
+        // nonceAuthorize / SPL setAuthority against paymaster-controlled
+        // accounts, draining or hijacking them — all without touching vault
+        // custody (which stays threshold-gated). Since the vault is the only
+        // account this program can legitimately sign for, pinning num_signers==1
+        // makes every non-vault account a non-signer in every CPI, closing the
+        // class on-chain for ALL callers. Verified: every SSP proposal builder
+        // (enterprise + wallet, native/SPL/memo) emits num_signers == 1; the
+        // vault is always the sole signer and payers/recipients ride the outer
+        // tx or sit in the writable-non-signer zone. num_writable_signers >= 1
+        // (below) combined with this forces the vault to be a WRITABLE signer.
         require_msg!(
-            message.num_signers >= 1,
+            message.num_signers == 1,
             ErrorCode::InvalidMessage,
-            "InvalidMessage: num_signers must be >= 1 (vault must sign)"
+            "InvalidMessage: num_signers must be exactly 1 (only the vault PDA may sign)"
         );
         require_msg!(
             message.account_keys[0] == expected_vault_pda,
@@ -747,6 +772,16 @@ pub mod solana_multisig {
     /// drop durable nonces and re-fetch a live blockhash + re-sign — which is
     /// exactly the SDK fallback below, at the cost of reintroducing the ~60s
     /// blockhash-expiry window this flow exists to eliminate.
+    ///
+    /// RELATED (permanent DoS variant, also non-custodial): because the nonce
+    /// address is `create_with_seed`-derived and predictable BEFORE init, anyone
+    /// can pre-fund it with 1 lamport — SystemProgram's `create_account_with_seed`
+    /// then fails forever (it rejects a non-empty target), so `provision_nonce`
+    /// can never succeed for that multisig. There is no reclaim path in the
+    /// current instruction set (draining a create_with_seed address needs
+    /// `transfer_with_seed` signed by the base). Same blast radius as the race:
+    /// only the durable-nonce convenience is lost; clients fall back to live
+    /// blockhash and funds are never at risk. Left as accepted pre-mainnet.
     ///
     /// MITIGATIONS SHIPPED (defense in depth):
     ///   1. PRIMARY — production callers bundle init + provision atomically in

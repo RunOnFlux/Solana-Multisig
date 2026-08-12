@@ -1,0 +1,66 @@
+name: Verifiable build
+
+# Deterministic docker builds via solana-verify, producing the executable hash
+# for both the devnet artifact (default features) and the mainnet artifact
+# (--features mainnet, different declare_id!). Runs on release tags and on
+# manual dispatch — this is the build that gets deployed and later verified
+# against the chain with `solana-verify verify-from-repo`.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  verifiable:
+    name: solana-verify build (devnet + mainnet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0" # matches rust-toolchain.toml
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install solana-verify
+        run: cargo install solana-verify --locked
+
+      - name: Verifiable build — devnet (default features)
+        run: solana-verify build --library-name solana_multisig
+
+      - name: Record devnet hash
+        run: |
+          mkdir -p verifiable-hashes
+          cp target/deploy/solana_multisig.so verifiable-hashes/solana_multisig-devnet.so
+          solana-verify get-executable-hash verifiable-hashes/solana_multisig-devnet.so \
+            | tee verifiable-hashes/devnet.hash
+
+      - name: Verifiable build — mainnet (--features mainnet)
+        run: solana-verify build --library-name solana_multisig -- --features mainnet
+
+      - name: Record mainnet hash
+        run: |
+          cp target/deploy/solana_multisig.so verifiable-hashes/solana_multisig-mainnet.so
+          solana-verify get-executable-hash verifiable-hashes/solana_multisig-mainnet.so \
+            | tee verifiable-hashes/mainnet.hash
+
+      - name: Summary
+        run: |
+          {
+            echo "## Verifiable build hashes"
+            echo ""
+            echo "| Artifact | Executable hash |"
+            echo "|---|---|"
+            echo "| devnet (default) | \`$(cat verifiable-hashes/devnet.hash)\` |"
+            echo "| mainnet (--features mainnet) | \`$(cat verifiable-hashes/mainnet.hash)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: verifiable-build-${{ github.ref_name }}
+          path: verifiable-hashes/
+          if-no-files-found: error

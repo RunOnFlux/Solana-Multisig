@@ -323,6 +323,63 @@ describe("Phase 6: Extra coverage", () => {
       expect(threw, "expected InvalidMessage").to.equal(true);
     });
 
+    // Regression guard for the signer-borrow class (pre-mainnet audit): a
+    // proposal may mark ONLY the vault (index 0) as a signer. Marking any
+    // second account as a signer would, at execute, borrow the outer tx's
+    // top-level signature (the relay paymaster / fee payer) and let the inner
+    // CPI move funds FROM that account. create_transaction must reject
+    // num_signers != 1 up front.
+    it("rejects num_signers > 1 (only the vault may sign — paymaster-borrow guard)", async () => {
+      const { members, multisig, vault } = await setupMultisig({
+        memberCount: 3,
+        threshold: 2,
+        preFundVaultLamports: 0.1 * LAMPORTS_PER_SOL,
+      });
+      // Stand-in for the relay paymaster: a second "signer" the attacker wants
+      // the outer fee-payer signature to cover.
+      const paymaster = Keypair.generate();
+      const attacker = Keypair.generate();
+      const message = {
+        numSigners: 2, // illegal: vault + paymaster both marked signers
+        numWritableSigners: 2,
+        numWritableNonSigners: 1,
+        accountKeys: [
+          vault,
+          paymaster.publicKey,
+          attacker.publicKey,
+          SystemProgram.programId,
+        ],
+        instructions: [
+          {
+            programIdIndex: 3,
+            accountIndexes: Buffer.from([1, 2]), // transfer FROM paymaster TO attacker
+            data: systemTransferData(1000),
+          },
+        ],
+        addressTableLookups: [],
+      };
+      const { pda } = await nextTransactionPda(multisig);
+
+      let threw = false;
+      try {
+        await program.methods
+          .createTransaction(0, message as any)
+          .accountsPartial({
+            multisig,
+            transaction: pda,
+            creator: members[0].publicKey,
+            payer: members[0].publicKey,
+            systemProgram: SystemProgram.programId,
+          })
+          .signers([members[0]])
+          .rpc();
+      } catch (e: any) {
+        threw = true;
+        expect(String(e)).to.match(/InvalidMessage/);
+      }
+      expect(threw, "expected InvalidMessage").to.equal(true);
+    });
+
     it("rejects program_id_index pointing at the vault (index 0)", async () => {
       const { members, multisig, vault } = await setupMultisig({
         memberCount: 3,
