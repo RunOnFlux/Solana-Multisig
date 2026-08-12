@@ -19,7 +19,29 @@ Peer-ish requirements: `@solana/web3.js`, `@coral-xyz/anchor` (already direct de
 | Network | Program ID |
 |---|---|
 | Devnet | `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX` |
-| Mainnet | `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r` (deploy pending) |
+| Mainnet | `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r` |
+
+Pass the program ID for your cluster to the constructor — the client retargets
+the bundled IDL at it, so instruction building and PDA derivation always agree.
+
+## Mainnet usage
+
+Two things are required on mainnet and optional on devnet:
+
+```typescript
+const client = new SolanaMultisigClient(connection, MAINNET_PROGRAM_ID, wallet, {
+  priorityFeeMicroLamports: 50_000,
+});
+```
+
+1. **Set `priorityFeeMicroLamports`.** Base-fee-only transactions are
+   deprioritised under load and routinely dropped outright on mainnet — the
+   signature simply never lands. The fee is charged per compute unit actually
+   consumed, so it costs a fraction of a lamport on these instructions. Devnet
+   is uncontended, so the default of `0` is fine there.
+2. **Use a dedicated RPC endpoint.** The public `api.mainnet-beta.solana.com`
+   rate-limits and silently drops forwarded transactions; a paid endpoint
+   (Helius, Triton, QuickNode, …) is required for reliable sends.
 
 ## Quick start
 

@@ -10,6 +10,7 @@ import {
   TransactionMessage as Web3TransactionMessage,
   VersionedTransaction,
   AddressLookupTableProgram,
+  ComputeBudgetProgram,
   NonceAccount,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
@@ -68,7 +69,7 @@ export interface AnchorWalletLike {
  */
 function patchIxEncoderBufferSize(program: Program, size: number): void {
   try {
-    const ixCoder = (program.coder.instruction as unknown) as {
+    const ixCoder = program.coder.instruction as unknown as {
       ixLayouts?: Map<
         string,
         {
@@ -98,6 +99,23 @@ function patchIxEncoderBufferSize(program: Program, size: number): void {
   }
 }
 
+export interface SolanaMultisigClientOptions {
+  /**
+   * ComputeBudget priority fee (micro-lamports per compute unit) applied to
+   * every transaction this client sends.
+   *
+   * MAINNET: leaving this at 0 means base-fee-only transactions, which under
+   * load are deprioritised and routinely dropped outright — the signature
+   * simply never lands (observed repeatedly against mainnet-beta during the
+   * launch smoke test). Set a non-zero value for any mainnet use. Devnet is
+   * uncontended, so 0 is fine there.
+   *
+   * The fee is charged per compute unit actually consumed, so modest values
+   * cost fractions of a lamport on our small instructions.
+   */
+  priorityFeeMicroLamports?: number;
+}
+
 /**
  * Main SDK client for the SSP Solana Multisig program.
  */
@@ -106,14 +124,17 @@ export class SolanaMultisigClient {
   private program: Program;
   private programId: PublicKey;
   private provider: AnchorProvider;
+  private priorityFeeMicroLamports: number;
 
   constructor(
     connection: Connection,
     programId: PublicKey,
-    wallet?: AnchorWalletLike
+    wallet?: AnchorWalletLike,
+    options?: SolanaMultisigClientOptions
   ) {
     this.connection = connection;
     this.programId = programId;
+    this.priorityFeeMicroLamports = options?.priorityFeeMicroLamports ?? 0;
 
     // Default to a read-only stub wallet — query-only methods (`deriveAddress`,
     // `getMultisig`, the `build*Instruction` helpers) never ask the provider
@@ -142,14 +163,25 @@ export class SolanaMultisigClient {
       signTransaction: throwNoWallet,
       signAllTransactions: throwNoWallet,
     };
-    this.provider = new AnchorProvider(
-      connection,
-      readonlyWallet as never,
-      { commitment: "confirmed" }
-    );
+    this.provider = new AnchorProvider(connection, readonlyWallet as never, {
+      commitment: "confirmed",
+    });
 
-    // Load program IDL (bundled in the SDK)
-    const idl = require("./idl/solana_multisig.json");
+    // Load program IDL (bundled in the SDK) and retarget it at the caller's
+    // programId.
+    //
+    // CRITICAL: Anchor >= 0.30 takes the program address from `idl.address`,
+    // NOT from a separate constructor argument. The bundled IDL is generated
+    // from the default (devnet) build, so without this override every
+    // instruction this client builds would be addressed to the devnet program
+    // — silently correct on devnet, and failing with `ProgramAccountNotFound`
+    // on any other cluster (mainnet uses a different program ID). PDA
+    // derivation already uses `this.programId`; this makes instruction
+    // building agree with it.
+    const idl = {
+      ...require("./idl/solana_multisig.json"),
+      address: programId.toBase58(),
+    };
     this.program = new Program(idl, this.provider);
 
     // Anchor's BorshInstructionCoder pre-allocates a 1000-byte scratch
@@ -160,6 +192,22 @@ export class SolanaMultisigClient {
     // hit ~1100. Bump the scratch buffer to 2000 to safely cover any
     // valid create_transaction proposal.
     patchIxEncoderBufferSize(this.program, 2000);
+  }
+
+  /**
+   * ComputeBudget instructions to prepend to every transaction this client
+   * sends. Empty when no priority fee is configured, so devnet/localnet
+   * transactions keep their existing shape and size exactly.
+   */
+  private priorityInstructions(): TransactionInstruction[] {
+    if (!this.priorityFeeMicroLamports || this.priorityFeeMicroLamports <= 0) {
+      return [];
+    }
+    return [
+      ComputeBudgetProgram.setComputeUnitPrice({
+        microLamports: this.priorityFeeMicroLamports,
+      }),
+    ];
   }
 
   /**
@@ -212,7 +260,11 @@ export class SolanaMultisigClient {
       addresses: altAddresses,
     });
 
-    const tx = new Transaction().add(createIx, extendIx);
+    const tx = new Transaction().add(
+      ...this.priorityInstructions(),
+      createIx,
+      extendIx
+    );
     await sendAndConfirmTransaction(this.connection, tx, [payer], {
       commitment: "confirmed",
     });
@@ -307,7 +359,7 @@ export class SolanaMultisigClient {
     const v0Message = new Web3TransactionMessage({
       payerKey: payer.publicKey,
       recentBlockhash: blockhash,
-      instructions: [initializeIx],
+      instructions: [...this.priorityInstructions(), initializeIx],
     }).compileToV0Message([altResp.value]);
 
     const tx = new VersionedTransaction(v0Message);
@@ -333,6 +385,7 @@ export class SolanaMultisigClient {
     funder: Keypair
   ): Promise<string> {
     const tx = new Transaction().add(
+      ...this.priorityInstructions(),
       SystemProgram.transfer({
         fromPubkey: funder.publicKey,
         toPubkey: address,
@@ -472,6 +525,7 @@ export class SolanaMultisigClient {
         payer: rentPayer.publicKey,
         systemProgram: SystemProgram.programId,
       })
+      .preInstructions(this.priorityInstructions())
       .signers(signers)
       .rpc();
 
@@ -507,6 +561,7 @@ export class SolanaMultisigClient {
         transaction: transactionAddress,
         member: member.publicKey,
       })
+      .preInstructions(this.priorityInstructions())
       .signers([member])
       .rpc();
 
@@ -543,6 +598,7 @@ export class SolanaMultisigClient {
         transaction: transactionAddress,
         executor: executor.publicKey,
       })
+      .preInstructions(this.priorityInstructions())
       .signers([executor]);
 
     // Add remaining accounts for CPI if provided
@@ -871,9 +927,7 @@ export class SolanaMultisigClient {
    * if not, fall back to live-blockhash signing — vault funds are safe in
    * either case, only the offline-sign convenience is lost.
    */
-  async getNonceAuthority(opts: {
-    multisigAddress: PublicKey;
-  }): Promise<{
+  async getNonceAuthority(opts: { multisigAddress: PublicKey }): Promise<{
     nonceAccount: PublicKey;
     authority: PublicKey;
     nonceValue: string;
@@ -1015,7 +1069,9 @@ export class SolanaMultisigClient {
         payer: opts.payer.publicKey,
       });
 
-    const altResp = await this.connection.getAddressLookupTable(opts.membersAlt);
+    const altResp = await this.connection.getAddressLookupTable(
+      opts.membersAlt
+    );
     if (!altResp.value) {
       throw new Error(
         `ALT not found at ${opts.membersAlt.toBase58()} — call createMembersAddressLookupTable first`

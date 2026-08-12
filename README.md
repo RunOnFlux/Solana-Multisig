@@ -5,7 +5,7 @@ A self-initiating Solana multisig program where the multisig address is **determ
 | Network | Program ID |
 |---|---|
 | Devnet | `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX` |
-| Mainnet | `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r` (deploy pending — see `docs/MAINNET_RUNBOOK.md`) |
+| Mainnet | `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r` |
 
 Mainnet artifacts are built with `--features mainnet`, which swaps `declare_id!`
 to the mainnet address; the default build stays on the devnet ID.
@@ -225,7 +225,9 @@ The program-level differences above are what actually distinguish this design.
 - ✅ Devnet deployed (program ID `CisPSFTQoTnEqn5cUi1pgpfPp2xiTVRkK7eD5jBevxdX`, IDL on-chain)
 - ✅ End-to-end smoke tests passing on devnet (SOL, SPL, 7-of-10, Jupiter format, bundled single-tx, decoupled-init)
 - ✅ Anchor test suite passing in isolated phase runs; multi-phase chained runs are flaky due to local validator load (use `bash scripts/run-tests.sh phase4` etc. per phase)
-- ⏳ Mainnet deploy pending (separate keypair, ID `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r`; upgradeable — single-sig authority at launch, transfer to an SSP enterprise governance vault planned; see `docs/MAINNET_RUNBOOK.md`)
+- ✅ Mainnet deployed (program ID `SSPWVu7dtTDkZYmDx73StqV46PioSmdiNE7igpjHK1r`, IDL on-chain, `solana-verify` reproducible-build verified against this repo)
+- ✅ Mainnet smoke test passed end-to-end with real lamports (init → propose → approve → execute → close)
+- ⏳ Upgrade authority is still the single-sig launch key; transfer to an SSP enterprise governance vault is planned (see `docs/MAINNET_RUNBOOK.md` §6)
 
 ## License
 
