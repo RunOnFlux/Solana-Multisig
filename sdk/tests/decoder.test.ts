@@ -418,7 +418,7 @@ describe("decodeVaultSolanaTransaction", function () {
     assert.equal(decodedNoOpts.recipients[0].address, destAta);
   });
 
-  it("(c) decodes legacy SPL Transfer (tag 3): mint and decimals undefined", async function () {
+  it("(c) refuses legacy SPL Transfer (tag 3): no mint on the wire, counted as unknown (SOL-5)", async function () {
     const { base64 } = await buildBundle({
       innerInstructions: [
         splLegacyTransferInstruction(),
@@ -432,22 +432,23 @@ describe("decodeVaultSolanaTransaction", function () {
     const decoded = decodeVaultSolanaTransaction(base64, PROGRAM_ID);
     assert.equal(decoded.kind, "create");
     if (decoded.kind !== "create") return;
-    assert.equal(decoded.recipients.length, 1);
-    const recipient = decoded.recipients[0];
-    assert.equal(recipient.asset, "spl");
-    assert.equal(recipient.mint, undefined);
-    assert.equal(recipient.decimals, undefined);
-    assert.equal(recipient.ata, destAta);
-    assert.equal(recipient.address, destAta);
-    assert.equal(recipient.amount, SPL_AMOUNT.toString());
+    // Not surfaced as a recipient any more: the token cannot be identified.
+    assert.equal(decoded.recipients.length, 0);
+    assert.equal(decoded.unknownInnerInstructionCount, 1);
+    assert.equal(decoded.feeLamports, FEE_LAMPORTS.toString());
 
-    // Matching on the raw ata address works.
+    // The comparison that used to pass (matching on the raw ata) now fails.
     const compared = compareDecodedToExpected(decoded, {
       recipients: [{ address: destAta, amount: SPL_AMOUNT.toString() }],
-      tokenMint: mint.toBase58(), // mint not comparable (absent on the wire)
+      tokenMint: mint.toBase58(),
       maxFeeLamports: FEE_LAMPORTS.toString(),
     });
-    assert.equal(compared.ok, true);
+    assert.equal(compared.ok, false);
+    assert.ok(
+      compared.mismatches.some((m) =>
+        m.includes("unrecognized inner instruction")
+      )
+    );
   });
 
   it("(d) decodes an approve-only tx (split-flow subsequent signer)", async function () {

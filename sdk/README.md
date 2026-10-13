@@ -230,6 +230,19 @@ tx.partialSign(keyKeypair);      // adds key's Ed25519 sig
 const sig = await connection.sendRawTransaction(tx.serialize());
 ```
 
+## Verifying what you sign (decoder)
+
+`src/decoder.ts` is a self-contained, offline decoder for signing devices (it can be vendored as a single file). Every entry point is **fail-closed**: anything it cannot positively account for is a mismatch, and `undecodable` must block signing.
+
+| Function | Use for |
+|---|---|
+| `decodeVaultSolanaTransaction(base64, programId, opts?)` + `compareDecodedToExpected(decoded, expected)` | Enterprise bundles. Pass `expectedMultisigPda` (derived locally with `deriveMultisigAddress`), `tokenMint`/`tokenDecimals` and a `maxFeeLamports` cap. Legacy SPL `Transfer` (tag 3) is refused; SPL transfers must be `TransferChecked` of the expected mint; a native payload never matches a token transfer. Opt in to capped ComputeBudget (`allowComputeBudget`) and Memo v2 (`allowMemo`). |
+| `verifyApproveOnlyTransaction({ connection, serializedTxBase64, programId, expected })` | Approve-only (split-flow) requests: fetches the on-chain `VaultTransaction` at the approve target with the device's own RPC, decodes the stored message and compares it to the displayed payload. Display the values from the returned `proposal`. |
+| `fetchAndDecodeProposal` / `decodeVaultTransactionAccount` + `compareProposalToExpected` | The building blocks of the approve-only gate (owner, discriminator and canonical-PDA checked). |
+| `verifyConsumerSolanaBundle(base64, params)` | Consumer 2-of-2 send bundles: exactly one create, approvals by distinct members, every multisig ix bound to the locally derived multisig, fee payer not a member, capped ComputeBudget, ATA create only for the recipient, inner message = the expected transfer + capped fee reimbursement (+ Memo). |
+
+Token decimals shown to the user must come from the signed `TransferChecked` bytes (`recipient.decimals`) or the device's own token list, keyed by `recipient.mint` — never from the relay — and the mint should always be displayed.
+
 ## Limits
 
 | | Value |

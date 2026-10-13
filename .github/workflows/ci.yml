@@ -9,6 +9,10 @@ on:
     - cron: "0 6 * * *"
   workflow_dispatch:
 
+# Read-only token for every job (DEP-15 / least privilege).
+permissions:
+  contents: read
+
 # Cancel superseded runs on the same ref to save minutes.
 concurrency:
   group: ci-${{ github.ref }}
@@ -23,9 +27,11 @@ jobs:
     name: SDK (build + TS↔Rust parity)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
 
@@ -51,36 +57,54 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SOLANA_VERSION: "2.2.20"
+      # sha256 of solana-release-x86_64-unknown-linux-gnu.tar.bz2 for
+      # SOLANA_VERSION, as recorded by GitHub on the anza-xyz/agave release
+      # asset (`gh api repos/anza-xyz/agave/releases/tags/v2.2.20`).
+      SOLANA_RELEASE_SHA256: "c9b57cc8a36b54c21b5de9f9065217499082446efffe22cb636c58b2858aceaa"
       ANCHOR_VERSION: "0.31.1"
+      ANCHOR_REV: "47284f8f0b9844c6b83234aa90f556bad00e12ed" # anchor tag v0.31.1
       RUST_VERSION: "1.95.0" # keep in sync with rust-toolchain.toml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12 (toolchain given explicitly)
         with:
           toolchain: "1.95.0" # `toolchain` input overrides the @stable ref; matches rust-toolchain.toml
           components: rustfmt, clippy
 
       - name: Cache cargo + build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      # Pinned release tarball, checked against a pinned sha256 before use
+      # (replaces `curl | sh` of the anza installer, which fetched and ran
+      # unverified code). Same tarball agave-install would unpack.
       - name: Install Solana CLI
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          tarball="$RUNNER_TEMP/solana-release.tar.bz2"
+          curl -sSfL --retry 3 -o "$tarball" \
+            "https://github.com/anza-xyz/agave/releases/download/v${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+          echo "${SOLANA_RELEASE_SHA256}  ${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/solana-${SOLANA_VERSION}"
+          tar -xjf "$tarball" -C "$HOME/solana-${SOLANA_VERSION}"
+          echo "$HOME/solana-${SOLANA_VERSION}/solana-release/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/solana-${SOLANA_VERSION}/solana-release/bin:$PATH"
           # Fail loudly (and record the exact toolchain) if the pinned CLI did not
           # install — otherwise anchor silently falls back to its bundled sbf tools
           # (an older rustc that can't compile the current deps).
           solana --version
           cargo-build-sbf --version
 
-      - name: Install Anchor (avm)
+      # anchor-cli built from the pinned v0.31.1 commit with its own lockfile
+      # (was: avm from the anchor repo's moving HEAD + an unverified binary
+      # download). avm is removed first because it owns the `anchor` name.
+      - name: Install Anchor (pinned commit, locked)
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor avm --force
-          avm install "$ANCHOR_VERSION"
-          avm use "$ANCHOR_VERSION"
+          cargo uninstall avm >/dev/null 2>&1 || true
+          cargo install --git https://github.com/coral-xyz/anchor --rev "$ANCHOR_REV" anchor-cli --locked
+          anchor --version | grep -F "$ANCHOR_VERSION"
 
       # Correctness lints only (no formatting gate). Blocking — the tree is
       # clippy-clean as of the mainnet-prep hardening.
@@ -112,34 +136,49 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SOLANA_VERSION: "2.2.20"
+      SOLANA_RELEASE_SHA256: "c9b57cc8a36b54c21b5de9f9065217499082446efffe22cb636c58b2858aceaa"
       ANCHOR_VERSION: "0.31.1"
+      ANCHOR_REV: "47284f8f0b9844c6b83234aa90f556bad00e12ed" # anchor tag v0.31.1
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12 (toolchain given explicitly)
         with:
           toolchain: "1.95.0" # matches rust-toolchain.toml
 
       - name: Cache cargo + build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
+      # Pinned release tarball, checked against a pinned sha256 before use
+      # (replaces `curl | sh` of the anza installer, which fetched and ran
+      # unverified code). Same tarball agave-install would unpack.
       - name: Install Solana CLI
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v${SOLANA_VERSION}/install)"
-          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-          export PATH="$HOME/.local/share/solana/install/active_release/bin:$PATH"
+          tarball="$RUNNER_TEMP/solana-release.tar.bz2"
+          curl -sSfL --retry 3 -o "$tarball" \
+            "https://github.com/anza-xyz/agave/releases/download/v${SOLANA_VERSION}/solana-release-x86_64-unknown-linux-gnu.tar.bz2"
+          echo "${SOLANA_RELEASE_SHA256}  ${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/solana-${SOLANA_VERSION}"
+          tar -xjf "$tarball" -C "$HOME/solana-${SOLANA_VERSION}"
+          echo "$HOME/solana-${SOLANA_VERSION}/solana-release/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/solana-${SOLANA_VERSION}/solana-release/bin:$PATH"
           # Fail loudly (and record the exact toolchain) if the pinned CLI did not
           # install — otherwise anchor silently falls back to its bundled sbf tools
           # (an older rustc that can't compile the current deps).
           solana --version
           cargo-build-sbf --version
 
-      - name: Install Anchor (avm)
+      # anchor-cli built from the pinned v0.31.1 commit with its own lockfile
+      # (was: avm from the anchor repo's moving HEAD + an unverified binary
+      # download). avm is removed first because it owns the `anchor` name.
+      - name: Install Anchor (pinned commit, locked)
         run: |
-          cargo install --git https://github.com/coral-xyz/anchor avm --force
-          avm install "$ANCHOR_VERSION"
-          avm use "$ANCHOR_VERSION"
+          cargo uninstall avm >/dev/null 2>&1 || true
+          cargo install --git https://github.com/coral-xyz/anchor --rev "$ANCHOR_REV" anchor-cli --locked
+          anchor --version | grep -F "$ANCHOR_VERSION"
 
       - name: Generate a local keypair for the validator
         run: solana-keygen new --no-bip39-passphrase --force -o "$HOME/.config/solana/id.json"

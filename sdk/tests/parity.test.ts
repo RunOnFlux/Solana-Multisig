@@ -36,6 +36,7 @@ import {
   APPROVE_TRANSACTION_DISCRIMINATOR,
   EXECUTE_TRANSACTION_DISCRIMINATOR,
   CLOSE_TRANSACTION_DISCRIMINATOR,
+  VAULT_TRANSACTION_ACCOUNT_DISCRIMINATOR,
 } from "../src/decoder";
 
 // Load the committed IDL via fs (not a JSON import) so the loader is identical
@@ -121,6 +122,15 @@ describe("parity: decoder discriminators == IDL (blind-signing gate)", () => {
       assert.deepEqual([...constant], byName[name]);
     });
   }
+
+  it("decoder VAULT_TRANSACTION_ACCOUNT_DISCRIMINATOR matches IDL VaultTransaction", () => {
+    const acc = idl.accounts.find((a) => a.name === "VaultTransaction");
+    assert.ok(acc);
+    assert.deepEqual(
+      [...VAULT_TRANSACTION_ACCOUNT_DISCRIMINATOR],
+      acc.discriminator
+    );
+  });
 });
 
 // Fixed, deterministic member set (valid mainnet pubkeys) for PDA vectors.

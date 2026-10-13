@@ -5,31 +5,55 @@ name: Verifiable build
 # (--features mainnet, different declare_id!). Runs on release tags and on
 # manual dispatch — this is the build that gets deployed and later verified
 # against the chain with `solana-verify verify-from-repo`.
+#
+# Everything that determines the output is pinned (DEP-15):
+# - solana-verify itself: exact crate version, installed --locked.
+# - the build image: by digest, passed explicitly with --base-image, so the
+#   result no longer depends on solana-verify's built-in version→image map or
+#   on a mutable docker tag. The digest is exactly what solana-verify 0.5.1
+#   selects on its own for this repo (Cargo.lock solana-program 2.3.0 →
+#   solanafoundation/solana-verifiable-build:2.3.0), so hashes stay identical
+#   to the audited mainnet build. When bumping solana-program, update the
+#   digest to solana-verify's image_config.rs entry for the new version and
+#   check it against the registry (`docker buildx imagetools inspect`).
+#   Third parties verifying the deployed program must use the same digest:
+#   solana-verify verify-from-repo ... --base-image "$SOLANA_VERIFY_IMAGE"
+# - no build cache: a release hash must come from a clean tree.
 on:
   push:
-    tags: ["v*"]
+    tags: ['v*']
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SOLANA_VERIFY_VERSION: '0.5.1'
+  SOLANA_VERIFY_IMAGE: 'solanafoundation/solana-verifiable-build@sha256:695f890e620db8c39afe5112e048599f8ee395a0cab5a2e572f30a72c6366cb4' # 2.3.0
 
 jobs:
   verifiable:
     name: solana-verify build (devnet + mainnet)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to full commit SHAs (tags can be moved).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master 2026-09-12 (toolchain given explicitly)
         with:
-          toolchain: "1.95.0" # matches rust-toolchain.toml
+          toolchain: '1.95.0' # matches rust-toolchain.toml
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
+      - name: Install solana-verify (pinned, locked)
+        run: cargo install solana-verify --version "=${SOLANA_VERIFY_VERSION}" --locked
 
-      - name: Install solana-verify
-        run: cargo install solana-verify --locked
+      - name: Pull build image by digest
+        run: docker pull "$SOLANA_VERIFY_IMAGE"
 
       - name: Verifiable build — devnet (default features)
-        run: solana-verify build --library-name solana_multisig
+        run: solana-verify build --base-image "$SOLANA_VERIFY_IMAGE" --library-name solana_multisig
 
       - name: Record devnet hash
         run: |
@@ -39,18 +63,24 @@ jobs:
             | tee verifiable-hashes/devnet.hash
 
       - name: Verifiable build — mainnet (--features mainnet)
-        run: solana-verify build --library-name solana_multisig -- --features mainnet
+        run: solana-verify build --base-image "$SOLANA_VERIFY_IMAGE" --library-name solana_multisig -- --features mainnet
 
       - name: Record mainnet hash
         run: |
           cp target/deploy/solana_multisig.so verifiable-hashes/solana_multisig-mainnet.so
           solana-verify get-executable-hash verifiable-hashes/solana_multisig-mainnet.so \
             | tee verifiable-hashes/mainnet.hash
+          {
+            echo "solana-verify ${SOLANA_VERIFY_VERSION}"
+            echo "image ${SOLANA_VERIFY_IMAGE}"
+          } > verifiable-hashes/toolchain.txt
 
       - name: Summary
         run: |
           {
             echo "## Verifiable build hashes"
+            echo ""
+            echo "solana-verify \`${SOLANA_VERIFY_VERSION}\`, image \`${SOLANA_VERIFY_IMAGE}\`"
             echo ""
             echo "| Artifact | Executable hash |"
             echo "|---|---|"
@@ -59,7 +89,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: verifiable-build-${{ github.ref_name }}
           path: verifiable-hashes/
