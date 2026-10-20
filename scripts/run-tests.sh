@@ -180,10 +180,13 @@ for FILE in "${TEST_FILES[@]}"; do
   fi
 
   # Run the phase. ts-mocha picks up tsconfig.json automatically.
+  # --exit: a test that times out mid-confirmation leaves web3.js sockets
+  # open, and without it mocha prints its summary and then never exits
+  # (that hung the nightly job until the 6h Actions limit on 2026-10-19).
   set +e
   ANCHOR_PROVIDER_URL="$RPC_URL" \
   ANCHOR_WALLET="$HOME/.config/solana/id.json" \
-    yarn run --silent ts-mocha -p ./tsconfig.json -t 120000 "$FILE"
+    yarn run --silent ts-mocha -p ./tsconfig.json -t 120000 --exit "$FILE"
   EXIT=$?
   set -e
 
@@ -194,6 +197,10 @@ for FILE in "${TEST_FILES[@]}"; do
     FAIL=$((FAIL + 1))
     FAILED_PHASES+=("$PHASE (mocha exit $EXIT)")
     echo "== $PHASE: FAIL (exit $EXIT)"
+    # The validator's own log lives in the ledger dir and is deleted below;
+    # print its tail so a failed phase can be diagnosed from the CI log.
+    echo "-- validator.log (last 80 lines)"
+    tail -n 80 "$LEDGER_DIR/validator.log" 2>/dev/null || true
   fi
 
   cleanup

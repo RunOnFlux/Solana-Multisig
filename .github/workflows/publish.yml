@@ -26,6 +26,7 @@ jobs:
   publish:
     name: verify, test, build, publish (provenance)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     # Required reviewers + "selected tags: sdk-v*" are configured on this
     # environment in the repo settings; the npm trusted publisher is bound to it.
     environment: npm-publish
