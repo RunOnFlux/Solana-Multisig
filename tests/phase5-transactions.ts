@@ -9,7 +9,7 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import { expect } from "chai";
-import { setupMultisigViaAlt } from "./_helpers";
+import { setupMultisigViaAlt, keepWebSocketOpen } from "./_helpers";
 
 /**
  * Phase 5: Transaction Proposal Lifecycle (V0-style messages).
@@ -21,6 +21,7 @@ import { setupMultisigViaAlt } from "./_helpers";
 describe("Phase 5: Transaction Lifecycle", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
   const programId = program.programId;

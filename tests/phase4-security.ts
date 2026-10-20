@@ -4,6 +4,7 @@ import { SolanaMultisig } from "../target/types/solana_multisig";
 import { Keypair, PublicKey, SystemProgram } from "@solana/web3.js";
 import { expect } from "chai";
 import * as crypto from "crypto";
+import { keepWebSocketOpen } from "./_helpers";
 
 /**
  * Phase 4: Security & Attack Vector Testing — permissionless init model.
@@ -34,6 +35,7 @@ import * as crypto from "crypto";
 describe("Security Testing (permissionless init)", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 

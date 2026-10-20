@@ -8,7 +8,7 @@ import {
   LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
 import { expect } from "chai";
-import { setupMultisigViaAlt } from "./_helpers";
+import { setupMultisigViaAlt, keepWebSocketOpen } from "./_helpers";
 
 /**
  * Phase 7: close_transaction — garbage-collect executed proposal accounts
@@ -23,6 +23,7 @@ import { setupMultisigViaAlt } from "./_helpers";
 describe("Phase 7: close_transaction", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
   const programId = program.programId;

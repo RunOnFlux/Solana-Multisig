@@ -4,10 +4,12 @@ import { SolanaMultisig } from "../target/types/solana_multisig";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { expect } from "chai";
 import * as crypto from "crypto";
+import { keepWebSocketOpen } from "./_helpers";
 
 describe("Phase 1: SSP Solana Multisig", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 

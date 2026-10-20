@@ -18,7 +18,7 @@ import {
   getAccount,
 } from "@solana/spl-token";
 import { expect } from "chai";
-import { setupMultisigViaAlt } from "./_helpers";
+import { setupMultisigViaAlt, keepWebSocketOpen } from "./_helpers";
 
 /**
  * Phase 6: Extra coverage gaps identified during round 8 audit.
@@ -30,6 +30,7 @@ import { setupMultisigViaAlt } from "./_helpers";
 describe("Phase 6: Extra coverage", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
   const programId = program.programId;
