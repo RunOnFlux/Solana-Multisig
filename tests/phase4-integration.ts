@@ -3,7 +3,12 @@ import { Program } from "@coral-xyz/anchor";
 import { SolanaMultisig } from "../target/types/solana_multisig";
 import { Keypair, PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { expect } from "chai";
-import { sortMembers, createMembersAlt, sendInitTxViaAlt } from "./_helpers";
+import {
+  sortMembers,
+  createMembersAlt,
+  sendInitTxViaAlt,
+  keepWebSocketOpen,
+} from "./_helpers";
 
 /**
  * Phase 4: Integration Tests
@@ -18,6 +23,7 @@ import { sortMembers, createMembersAlt, sendInitTxViaAlt } from "./_helpers";
 describe("Integration Tests", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
 
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 

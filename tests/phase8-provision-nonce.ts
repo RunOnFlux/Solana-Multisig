@@ -12,7 +12,7 @@ import {
   Transaction,
 } from "@solana/web3.js";
 import { expect } from "chai";
-import { setupMultisigViaAlt } from "./_helpers";
+import { setupMultisigViaAlt, keepWebSocketOpen } from "./_helpers";
 import { SolanaMultisigClient } from "../sdk/src";
 
 /**
@@ -35,6 +35,7 @@ import { SolanaMultisigClient } from "../sdk/src";
 describe("Phase 8: provision_nonce", () => {
   const provider = anchor.AnchorProvider.env();
   anchor.setProvider(provider);
+  keepWebSocketOpen(provider.connection);
   const program = anchor.workspace.SolanaMultisig as Program<SolanaMultisig>;
 
   // SSP-01 guard helpers live on the SDK client. Read-only methods

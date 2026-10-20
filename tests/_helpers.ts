@@ -12,6 +12,26 @@ import {
 import * as crypto from "crypto";
 import type { SolanaMultisig } from "../target/types/solana_multisig";
 
+/**
+ * Hold one websocket subscription open for the whole test file. Call it once
+ * per file, right after `anchor.setProvider(provider)`.
+ *
+ * web3.js 1.x closes its websocket 500ms after the last subscription ends and
+ * opens a fresh one for the next. If the fresh socket opens before the old
+ * socket's (deferred) `close` event is delivered, the Connection marks itself
+ * disconnected while its socket is in fact open, and every later subscription
+ * stays `pending` forever: transactions land, but `confirmTransaction` never
+ * resolves. Tests then fail with block-height-exceeded and 120s timeouts, and
+ * the open socket stops mocha from exiting. The `fund()` helpers sleep 500ms
+ * between airdrops, which puts most reconnects right inside that window.
+ * With a subscription always open the socket is never idle-closed, so the
+ * reconnect (and the race) never happens.
+ */
+export function keepWebSocketOpen(connection: Connection): void {
+  const id = connection.onSlotChange(() => {});
+  after(() => connection.removeSlotChangeListener(id));
+}
+
 /** Sort pubkeys by raw bytes — must match the program's `sort_members`. */
 export function sortMembers(members: PublicKey[]): PublicKey[] {
   return [...members].sort((a, b) =>
